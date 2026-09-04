@@ -1,8 +1,8 @@
 """
 ================================================================================
-🚀 GOD-MODE QUANT MICROSERVICE FOR YOUR EXISTING RUST ENGINE
+🚀 EXTREME-MODE QUANT MICROSERVICE FOR YOUR EXISTING RUST ENGINE
 ================================================================================
-File: god_mode_engine.py
+File: extreme_mode_engine.py
 Place this file directly in your existing Git repo: `Downloads/quant/`
 It transmits 3-Factor institutional signals (RLS-OU + OFI + HMM) 
 directly into your Rust Master Aggregator on UDP Port 5000.
@@ -117,7 +117,7 @@ async def stream_feed(symbol="ethusdt"):
     hmm = HMMRegimeGate()
     last_mid = None
 
-    print(f"\n{CYAN}🛡️ [GOD-MODE QUANT] Connected to Binance for {symbol.upper()}. Piping to Rust UDP 5000...{RESET}")
+    print(f"\n{CYAN}🛡️ [EXTREME-MODE QUANT] Connected to Binance for {symbol.upper()}. Piping to Rust UDP 5000...{RESET}")
 
     async with websockets.connect(uri) as ws:
         while True:
@@ -142,14 +142,14 @@ async def stream_feed(symbol="ethusdt"):
                     
                     # 🟢 SNIPER ENTRY TRIGGER: Z <= -1.5 and Institutional Order Flow > 0.15
                     if z_score <= -1.5 and ofi_norm >= 0.15:
-                        headline = f"GOD-MODE SNIPER: {symbol.upper()} Z={z_score:.2f}, OFI={ofi_norm:.2f}"
+                        headline = f"EXTREME-MODE SNIPER: {symbol.upper()} Z={z_score:.2f}, OFI={ofi_norm:.2f}"
                         # Sends score >= 0.5 which immediately triggers BUY in your Rust engine!
-                        send_signal_to_rust("GOD_MODE_QUANT", headline, score=0.95)
+                        send_signal_to_rust("EXTREME_MODE_QUANT", headline, score=0.95)
                         await asyncio.sleep(5) # Cooldown to prevent spam
 
                 elif not is_calm:
                     # 🛑 CRASH WARNING: Triggers instant protection
-                    send_signal_to_rust("GOD_MODE_CRASH_GUARD", "HMM CRASH REGIME DETECTED!", score=-0.95)
+                    send_signal_to_rust("EXTREME_MODE_CRASH_GUARD", "HMM CRASH REGIME DETECTED!", score=-0.95)
                     await asyncio.sleep(3)
 
             except Exception as e:
