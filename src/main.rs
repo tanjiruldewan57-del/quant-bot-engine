@@ -170,6 +170,7 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
     let mut price_history: Vec<f64> = Vec::with_capacity(25); // Pre-alloc for perf
     let mut is_trading = false;
     let mut reconnect_attempts: u32 = 0;
+    let mut last_sell_time = std::time::Instant::now() - std::time::Duration::from_secs(120); // Cooldown tracker
 
     // ♻️ EDGE CASE #1: WSS DISCONNECT AUTO-RECONNECT LOOP
     loop {
@@ -239,20 +240,24 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                         return; // Full stop — don't reconnect
                                     }
 
-                                    // 🟢 BUY LOGIC
-                                    if eth_balance == 0.0 && !is_trading {
-                                        if (z_score <= -z_thresh && std_dev > std_thresh) || nlp_score >= 0.5 {
+                                    // 🟢 BUY LOGIC — COMPETITION HARDENED & CALIBRATED
+                                    let cooldown_passed = last_sell_time.elapsed() >= std::time::Duration::from_secs(60);
+                                    if eth_balance == 0.0 && !is_trading && cooldown_passed {
+                                        let pure_dip = z_score <= -z_thresh && std_dev > std_thresh;
+                                        let sentiment_dip = nlp_score >= 0.5 && z_score <= 0.0; // Never buy at peak pump!
+
+                                        if pure_dip || sentiment_dip {
                                             is_trading = true;
                                             let gate = ComplianceGate::new();
                                             if gate.check_trade_validity("ETHUSDT", "BUY", false) {
-                                                let is_sentiment_trigger = nlp_score >= 0.5;
+                                                let is_sentiment_trigger = sentiment_dip && !pure_dip;
                                                 if is_sentiment_trigger {
                                                     let mut pw = shared_params.write().await;
                                                     pw.nlp_sentiment = 0.0;
                                                     nlp_score = 0.0;
                                                 }
                                                 let active_buffer = (usdt_balance - 97_000.0).max(0.0);
-                                                let trade_amount = (active_buffer * 0.35).min(1500.0);
+                                                let trade_amount = (active_buffer * 0.70).clamp(500.0, 2500.0);
                                                 if trade_amount < 10.0 {
                                                     warn!("🛑 [RISK MANAGER] Buffer depleted. Trade rejected.");
                                                     is_trading = false;
@@ -373,6 +378,7 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                                 use std::io::Write;
                                                 let _ = file.write_all(log.as_bytes());
                                             }
+                                            last_sell_time = std::time::Instant::now(); // Cooldown starts now
                                             is_trading = false;
                                         }
                                     }

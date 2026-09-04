@@ -96,8 +96,12 @@ def execute_humanoid_order(action: str, target_tp_pct: float = 0.003, stop_loss_
         sl = round(price * (1.0 + stop_loss_pct), 2)
         tp = round(price * (1.0 - target_tp_pct), 2)
 
-    # Calculate conservative volume (e.g. 0.1 to 1.0 lot)
-    lot_size = symbol_info.volume_min if symbol_info.volume_min > 0 else 0.1
+    # 🏆 COMPETITION WINNING LOT SIZING:
+    # On $100k account: 1.0 - 1.5 lots ($80 - $150 profit per win)
+    account_info = mt5.account_info()
+    balance = account_info.balance if account_info else 100000.0
+    calculated_lot = round((balance / 100000.0) * 1.5, 2)
+    lot_size = max(symbol_info.volume_min, min(calculated_lot, symbol_info.volume_max, 2.0))
 
     # Order Request — 100% Emulating Manual Terminal Order
     request = {
