@@ -67,7 +67,27 @@ def get_active_signals():
         "signal_2": {"asset": "USDCUSDT", "type": "BUY", "confidence": "99%", "source": "STABLECOIN_ARB"}
     }
 
+import threading
+import time
+import urllib.request
+
+def keep_alive_worker():
+    url = os.getenv("RENDER_EXTERNAL_URL")
+    if not url:
+        return
+    print(f"🔄 [KEEP-ALIVE] Auto-pinger armed for {url}")
+    while True:
+        time.sleep(600)  # Ping every 10 minutes to reset Render's 15-min idle timer
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'QuantEngineKeepAlive/1.0'})
+            with urllib.request.urlopen(req, timeout=15) as response:
+                pass
+            print(f"💓 [KEEP-ALIVE] Heartbeat pinged {url} successfully.")
+        except Exception as e:
+            print(f"⚠️ [KEEP-ALIVE] Ping warning: {e}")
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     print(f"🚀 [SaaS API] Booting up B2B Productization Server on 0.0.0.0:{port}...")
+    threading.Thread(target=keep_alive_worker, daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=port)
