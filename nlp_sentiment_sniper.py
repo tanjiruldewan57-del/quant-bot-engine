@@ -6,7 +6,8 @@ import socket
 import asyncio
 import urllib.request
 import xml.etree.ElementTree as ET
-from typing import Tuple, List, Set
+from collections import deque
+from typing import Tuple, List
 
 # ==========================================
 # 🛡️ 100% ZERO-LOGIN PUBLIC ALPHA FEED CONFIG
@@ -101,7 +102,7 @@ FEEDS = [
     {"name": "CryptoPanic Public Feed", "url": "https://cryptopanic.com/api/free/v1/posts/?auth_token=free&public=true", "type": "json"},
 ]
 
-seen_headlines: Set[str] = set()
+seen_headlines: deque = deque(maxlen=2000)  # [BUG#5 FIX] Auto-drops oldest, never clears all
 
 def fetch_rss_headlines(feed_url: str) -> List[str]:
     headlines = []
@@ -176,9 +177,7 @@ async def public_news_sniper_loop():
                         if score >= 0.5 or score <= -0.5:
                             broadcast_signal_to_rust(title, score, source=feed["name"])
 
-            # Keep cache bounded to 2000 items to conserve RAM
-            if len(seen_headlines) > 2000:
-                seen_headlines.clear()
+                        # deque(maxlen=2000) handles memory automatically — no manual clear needed
 
         except Exception as e:
             print(f"⚠️ [MONITOR NOTICE] Stream tick caught: {e}", flush=True)

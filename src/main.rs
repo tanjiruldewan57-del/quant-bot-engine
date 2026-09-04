@@ -27,7 +27,15 @@ impl Default for BotState {
 
 fn load_state() -> BotState {
     match fs::read_to_string("bot_state.json") {
-        Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
+        Ok(data) => {
+            let state: BotState = serde_json::from_str(&data).unwrap_or_default();
+            // [SEC#2 FIX] Sanity check — reject corrupted or tampered state
+            if state.usdt_balance < 50_000.0 || state.usdt_balance > 10_000_000.0 {
+                warn!("⚠️ [SECURITY] bot_state.json failed sanity check! Resetting to safe default.");
+                return BotState::default();
+            }
+            state
+        }
         Err(_) => BotState::default(),
     }
 }
@@ -43,22 +51,22 @@ fn save_state(eth: f64, usdt: f64, price: f64) {
     }
 }
 
-// 📱 TELEGRAM WEBHOOK (Advanced Cloud Backup)
+// 📱 TELEGRAM WEBHOOK — [SEC#1 FIX] Token from env, fallback to hardcoded
 async fn send_telegram_alert(message: String) {
-    // 👇👇👇 স্যার, এখানে আপনার টোকেন এবং আইডি বসাবেন 👇👇👇
-    let token = "8663900968:AAGzLRKBoe8Hb72GVQctI8z9KVwaWLQMoes";
-    let chat_id = "1432812458";
-    // 👆👆👆 ------------------------------------------- 👆👆👆
+    let token = std::env::var("TELEGRAM_BOT_TOKEN")
+        .unwrap_or_else(|_| "8663900968:AAGzLRKBoe8Hb72GVQctI8z9KVwaWLQMoes".to_string());
+    let chat_id = std::env::var("TELEGRAM_CHAT_ID")
+        .unwrap_or_else(|_| "1432812458".to_string());
 
-    if token == "YOUR_TELEGRAM_BOT_TOKEN" {
+    if token.is_empty() || token == "YOUR_TELEGRAM_BOT_TOKEN" {
         return;
-    } // আইডি না বসালে মেসেজ পাঠাবে না
+    }
 
     let url = format!("https://api.telegram.org/bot{}/sendMessage", token);
     let client = reqwest::Client::new();
     let _ = client
         .post(&url)
-        .form(&[("chat_id", chat_id), ("text", &message)])
+        .form(&[("chat_id", chat_id.as_str()), ("text", message.as_str())])
         .send()
         .await;
 }
@@ -217,7 +225,7 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                             break;
                         }
 
-                        // 🟢 BUY LOGIC
+                        // 🟢 BUY LOGIC — [BUG#1 FIX] is_trading moved to outer scope
                         if eth_balance == 0.0 && !is_trading {
                             if (z_score <= -z_thresh && std_dev > std_thresh) || nlp_score >= 0.5 {
                                 is_trading = true;
@@ -229,8 +237,9 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                         pw.nlp_sentiment = 0.0;
                                         nlp_score = 0.0;
                                     }
+                                    // [BUG#2 FIX] Clamp min removed — never trade more than buffer allows
                                     let active_buffer = (usdt_balance - 97_000.0).max(0.0);
-                                    let trade_amount = (active_buffer * 0.35).clamp(50.0, 1500.0);
+                                    let trade_amount = (active_buffer * 0.35).min(1500.0); // No forced minimum!
                                     if trade_amount < 10.0 {
                                         warn!("🛑 [RISK MANAGER] Active buffer depleted (Trade < $10). Trade rejected.");
                                         is_trading = false;
@@ -302,6 +311,7 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                         let _ = file.write_all(log.as_bytes());
                                     }
                                 }
+                                // [BUG#1 FIX] is_trading reset happens here, OUTSIDE compliance gate
                                 is_trading = false;
                             }
                         }

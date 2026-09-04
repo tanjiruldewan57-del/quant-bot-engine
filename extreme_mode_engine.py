@@ -116,6 +116,7 @@ async def stream_feed(symbol="ethusdt"):
     ofi_calc = OFICalculator()
     hmm = HMMRegimeGate()
     last_mid = None
+    last_buy_time = 0  # [BUG#3 FIX] Track when last BUY signal was sent
 
     print(f"\n{CYAN}🛡️ [EXTREME-MODE QUANT] Connected to Binance for {symbol.upper()}. Piping to Rust UDP 5000...{RESET}")
 
@@ -140,17 +141,22 @@ async def stream_feed(symbol="ethusdt"):
                 if ou is not None and is_calm:
                     z_score = (mid - ou['mu']) / (ou['equilibrium_std'] + 1e-12)
                     
-                    # 🟢 SNIPER ENTRY TRIGGER: Z <= -1.5 and Institutional Order Flow > 0.15
-                    if z_score <= -1.5 and ofi_norm >= 0.15:
-                        headline = f"EXTREME-MODE SNIPER: {symbol.upper()} Z={z_score:.2f}, OFI={ofi_norm:.2f}"
-                        # Sends score >= 0.5 which immediately triggers BUY in your Rust engine!
-                        send_signal_to_rust("EXTREME_MODE_QUANT", headline, score=0.95)
-                        await asyncio.sleep(5) # Cooldown to prevent spam
+                    # [BUG#4 FIX] Only send to Rust if this is ETH (Rust only trades ETH)
+                    if symbol.lower() == "ethusdt":
+                        # 🟢 SNIPER ENTRY TRIGGER: Z <= -1.5 and Institutional Order Flow > 0.15
+                        if z_score <= -1.5 and ofi_norm >= 0.15:
+                            headline = f"EXTREME-MODE SNIPER: {symbol.upper()} Z={z_score:.2f}, OFI={ofi_norm:.2f}"
+                            send_signal_to_rust("EXTREME_MODE_QUANT", headline, score=0.95)
+                            last_buy_time = time.time()
+                            await asyncio.sleep(5)  # Cooldown to prevent spam
 
                 elif not is_calm:
-                    # 🛑 CRASH WARNING: Triggers instant protection
-                    send_signal_to_rust("EXTREME_MODE_CRASH_GUARD", "HMM CRASH REGIME DETECTED!", score=-0.95)
-                    await asyncio.sleep(3)
+                    # [BUG#3 FIX] Only send crash guard if no BUY was sent in last 60 seconds
+                    # Prevents cutting legitimate profitable positions bought during a dip
+                    time_since_buy = time.time() - last_buy_time
+                    if symbol.lower() == "ethusdt" and time_since_buy > 60:
+                        send_signal_to_rust("EXTREME_MODE_CRASH_GUARD", "HMM CRASH REGIME DETECTED!", score=-0.95)
+                        await asyncio.sleep(3)
 
             except Exception as e:
                 await asyncio.sleep(2)
