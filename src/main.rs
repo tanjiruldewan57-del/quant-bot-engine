@@ -138,19 +138,189 @@ pub async fn start_master_signal_aggregator(shared_params: Arc<RwLock<DynamicPar
     }
 }
 
-// 🤖 AI OPTIMIZER
+// 🤖 CONTINUOUS DETERMINISTIC AI OPTIMIZER (Grid Search on 1,000 Binance Klines)
 pub async fn run_ai_optimizer(shared_params: Arc<RwLock<DynamicParams>>) {
-    info!("🤖 [AI OPTIMIZER] Downloading last 1000 mins data to find new Magic Numbers...");
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-    let mut p = shared_params.write().await;
-    p.window_size = 20;
-    p.z_threshold = 2.5;
-    p.std_dev_min = 0.5;
-    p.take_profit = 0.003;
-    warn!(
-        "✅ [AI UPDATED] New Brain: Window={}, Z={}, Std={}, TP={}",
-        p.window_size, p.z_threshold, p.std_dev_min, p.take_profit
-    );
+    info!("🤖 [AI OPTIMIZER] Armed. Running periodic 2-hour recalibration via Binance Klines...");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    // Allow trading engine 5 seconds to establish initial state before first run
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+    loop {
+        info!("🤖 [AI OPTIMIZER] Fetching last 1,000 1-minute klines from Binance REST API...");
+        let url = "https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=1m&limit=1000";
+
+        match client.get(url).send().await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    if let Ok(data) = resp.json::<Vec<Vec<Value>>>().await {
+                        let closes: Vec<f64> = data
+                            .iter()
+                            .filter_map(|k| {
+                                k.get(4)
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| s.parse::<f64>().ok())
+                            })
+                            .filter(|x| x.is_finite() && *x > 0.0)
+                            .collect();
+
+                        if closes.len() >= 200 {
+                            info!("🤖 [AI OPTIMIZER] Backtesting {} klines across parameter grid...", closes.len());
+
+                            let window_candidates = [15, 20, 25, 30];
+                            let z_candidates = [2.0, 2.3, 2.5, 2.7];
+                            let std_candidates = [0.5, 0.7, 1.0];
+                            let tp_candidates = [0.0025, 0.003, 0.0035];
+
+                            let mut best_score = -999999.0;
+                            let mut best_window = 20;
+                            let mut best_z = 2.5;
+                            let mut best_std = 0.5;
+                            let mut best_tp = 0.003;
+                            let mut best_wins = 0;
+                            let mut best_losses = 0;
+                            let mut best_pnl = 0.0;
+
+                            for &w in &window_candidates {
+                                for &z in &z_candidates {
+                                    for &s in &std_candidates {
+                                        for &tp in &tp_candidates {
+                                            let mut in_pos = false;
+                                            let mut entry_price = 0.0;
+                                            let mut pnl = 0.0;
+                                            let mut wins = 0;
+                                            let mut losses = 0;
+                                            let mut consecutive_loss = 0;
+                                            let mut max_consecutive_loss = 0;
+
+                                            for i in (w - 1)..closes.len() {
+                                                let window = &closes[(i + 1 - w)..=i];
+                                                let cur_price = closes[i];
+
+                                                let mean = window.iter().sum::<f64>() / w as f64;
+                                                let variance = window.iter().map(|v| (*v - mean).powi(2)).sum::<f64>() / w as f64;
+                                                let std_dev = variance.sqrt();
+
+                                                if !in_pos {
+                                                    let z_score = if std_dev > 0.0 { (cur_price - mean) / std_dev } else { 0.0 };
+                                                    if std_dev >= s && z_score <= -z {
+                                                        in_pos = true;
+                                                        entry_price = cur_price;
+                                                    }
+                                                } else {
+                                                    let ret = (cur_price - entry_price) / entry_price;
+                                                    if ret >= tp {
+                                                        pnl += tp;
+                                                        wins += 1;
+                                                        consecutive_loss = 0;
+                                                        in_pos = false;
+                                                    } else if ret <= -0.003 {
+                                                        pnl -= 0.003;
+                                                        losses += 1;
+                                                        consecutive_loss += 1;
+                                                        if consecutive_loss > max_consecutive_loss {
+                                                            max_consecutive_loss = consecutive_loss;
+                                                        }
+                                                        in_pos = false;
+                                                    }
+                                                }
+                                            }
+
+                                            let total_trades = wins + losses;
+                                            if total_trades >= 2 {
+                                                let win_rate = wins as f64 / total_trades as f64;
+                                                let streak_penalty = if max_consecutive_loss >= 2 { 0.004 * max_consecutive_loss as f64 } else { 0.0 };
+                                                let score = pnl + (win_rate * 0.006) - streak_penalty;
+
+                                                if score > best_score {
+                                                    best_score = score;
+                                                    best_window = w;
+                                                    best_z = z;
+                                                    best_std = s;
+                                                    best_tp = tp;
+                                                    best_wins = wins;
+                                                    best_losses = losses;
+                                                    best_pnl = pnl;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 🛡️ INSTITUTIONAL CLAMPS (Ensures parameters never breach safety bounds)
+                            let final_window = best_window.clamp(15, 35);
+                            let final_z = best_z.clamp(2.0, 3.0);
+                            let final_std = best_std.clamp(0.5, 2.0);
+                            let final_tp = best_tp.clamp(0.0025, 0.005);
+
+                            // Atomically write updated parameters into RwLock
+                            {
+                                let mut p = shared_params.write().await;
+                                p.window_size = final_window;
+                                p.z_threshold = final_z;
+                                p.std_dev_min = final_std;
+                                p.take_profit = final_tp;
+                            }
+
+                            let total_trades = best_wins + best_losses;
+                            let win_rate_pct = if total_trades > 0 {
+                                (best_wins as f64 / total_trades as f64) * 100.0
+                            } else {
+                                0.0
+                            };
+
+                            warn!(
+                                "✅ [AI OPTIMIZER] Recalibration done! Window={}, Z={:.2}, Std={:.2}, TP={:.4} | PnL: {:+.2}% ({}W/{}L)",
+                                final_window, final_z, final_std, final_tp, best_pnl * 100.0, best_wins, best_losses
+                            );
+
+                            let alert_msg = format!(
+                                "🤖 [AI OPTIMIZER RE-CALIBRATION]\n\
+                                ━━━━━━━━━━━━━━━━━━━━\n\
+                                📊 Sample: Past 1,000 Mins (Binance Klines)\n\
+                                🎯 Method: Deterministic Numerical Grid Search\n\
+                                \n\
+                                🧠 Upgraded Parameter Core:\n\
+                                • Rolling Window: {} mins\n\
+                                • Z-Threshold: -{:.2}σ (Institutional Dip)\n\
+                                • Volatility Floor: ${:.2}\n\
+                                • Dynamic TP: +{:.2}%\n\
+                                \n\
+                                📈 In-Sample Validation:\n\
+                                • Backtested Trades: {}\n\
+                                • Win Rate: {:.1}% ({}W / {}L)\n\
+                                • Simulated Net PnL: {:+.2}%\n\
+                                \n\
+                                🛡️ Safety Clamps: Strict Institutional Limits Enforced\n\
+                                ⏰ Next Recalibration: in 2 Hours\n\
+                                ━━━━━━━━━━━━━━━━━━━━",
+                                final_window, final_z, final_std, final_tp * 100.0,
+                                total_trades, win_rate_pct, best_wins, best_losses,
+                                best_pnl * 100.0
+                            );
+
+                            tokio::spawn(send_telegram_alert(alert_msg));
+                        } else {
+                            warn!("⚠️ [AI OPTIMIZER] Insufficient klines ({}). Keeping existing parameters.", closes.len());
+                        }
+                    }
+                } else {
+                    warn!("⚠️ [AI OPTIMIZER] Binance REST API returned status: {}", resp.status());
+                }
+            }
+            Err(e) => {
+                warn!("⚠️ [AI OPTIMIZER] Error connecting to Binance REST API: {}. Retrying in 2h...", e);
+            }
+        }
+
+        // Sleep for 2 hours before the next automatic recalibration cycle
+        tokio::time::sleep(tokio::time::Duration::from_secs(7200)).await;
+    }
 }
 
 // 🚀 MAIN TRADING ENGINE — HARDENED EDITION
@@ -250,13 +420,13 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
 
                                     let cooldown_passed = last_sell_time.elapsed() >= cooldown_duration;
                                     if eth_balance == 0.0 && !is_trading && cooldown_passed {
-                                        // 🛡️ STRICT REVERSAL FILTER:
-                                        // 1. Must have active volatility (std_dev >= 0.5) to avoid flat market noise
-                                        // 2. Pure dip requires extreme statistical oversold (Z <= -2.0)
-                                        // 3. Sentiment dip also requires Z <= -1.8 (Never buy falling knives in a cascade!)
-                                        let has_healthy_volatility = std_dev >= 0.5;
-                                        let pure_dip = z_score <= -2.0 && has_healthy_volatility;
-                                        let sentiment_dip = nlp_score >= 0.5 && z_score <= -1.8 && has_healthy_volatility;
+                                        // 🛡️ DYNAMIC REVERSAL FILTER (Tuned by Periodic AI Optimizer + Clamps):
+                                        // 1. Must have active volatility (std_dev >= std_thresh) to avoid flat market noise
+                                        // 2. Pure dip requires extreme statistical oversold (Z <= -z_thresh)
+                                        // 3. Sentiment dip allows slight threshold boost while still requiring oversold dip (Never catch falling knives!)
+                                        let has_healthy_volatility = std_dev >= std_thresh;
+                                        let pure_dip = z_score <= -z_thresh && has_healthy_volatility;
+                                        let sentiment_dip = nlp_score >= 0.5 && z_score <= -(z_thresh - 0.2).max(1.8) && has_healthy_volatility;
 
                                         if pure_dip || sentiment_dip {
                                             is_trading = true;
@@ -522,5 +692,23 @@ mod tests {
             false,
             "🚨 FAILED: Haram/Meme coin was allowed!"
         );
+    }
+
+    #[test]
+    fn test_dynamic_params_clamping() {
+        let raw_window: usize = 10;
+        let raw_z: f64 = 1.2;
+        let raw_std: f64 = 0.2;
+        let raw_tp: f64 = 0.01;
+
+        let clamped_window = raw_window.clamp(15, 35);
+        let clamped_z = raw_z.clamp(2.0, 3.0);
+        let clamped_std = raw_std.clamp(0.5, 2.0);
+        let clamped_tp = raw_tp.clamp(0.0025, 0.005);
+
+        assert_eq!(clamped_window, 15);
+        assert_eq!(clamped_z, 2.0);
+        assert_eq!(clamped_std, 0.5);
+        assert_eq!(clamped_tp, 0.005);
     }
 }
