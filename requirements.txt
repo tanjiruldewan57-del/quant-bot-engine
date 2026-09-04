@@ -1,0 +1,6 @@
+telethon
+python-dotenv
+websockets
+numpy
+reqwest
+aiohttp

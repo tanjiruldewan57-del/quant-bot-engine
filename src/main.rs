@@ -412,6 +412,17 @@ async fn main() {
         nlp_sentiment: 0.0,
     };
 
+    // 📱 Send immediate boot notification to user's Telegram
+    let boot_msg = "🚀 [QUANT ENGINE ONLINE]\n\
+                    ━━━━━━━━━━━━━━━━━━━━\n\
+                    ✅ Master Core: Connected to Binance WSS (ETH/USDT)\n\
+                    ✅ Dual-Core AI & NLP Aggregator: Armed (127.0.0.1:5000)\n\
+                    ✅ Halal Compliance Gate: Active (Spot Only | Zero Riba)\n\
+                    ✅ Circuit Breaker: 3% Grossman-Zhou Floor ($97,000)\n\
+                    📡 Status: Actively hunting institutional statistical dips...\n\
+                    ━━━━━━━━━━━━━━━━━━━━".to_string();
+    tokio::spawn(send_telegram_alert(boot_msg));
+
     let shared_params = Arc::new(RwLock::new(initial_params));
     let agg_params = shared_params.clone();
     tokio::spawn(async move {

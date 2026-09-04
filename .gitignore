@@ -1,2 +1,8 @@
 /target
-
+.env
+*.session
+*.session-journal
+bot_state.json
+trades.csv
+__pycache__/
+*.pyc

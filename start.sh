@@ -9,8 +9,7 @@ python3 saas_api.py &
 echo "🐳 Starting Whale Tracker Microservice..."
 python3 whale_tracker.py &
 
-# (আপনার যদি nlp_engine.py বা অন্যান্য বট রেডি থাকে, তবে সেগুলোর নামও নিচে দিতে পারেন)
-# python3 nlp_engine.py &
+python3 nlp_sentiment_sniper.py &
 python3 extreme_mode_engine.py &
 python3 spot_arbitrage_scanner.py &
 
