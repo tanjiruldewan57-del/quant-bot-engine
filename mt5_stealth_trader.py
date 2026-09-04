@@ -169,6 +169,19 @@ def execute_humanoid_order(action: str, target_tp_pct: float = 0.003, stop_loss_
         print(f"⚠️ [TICK ERROR] No price data for {SYMBOL}", flush=True)
         return False
 
+    # 🛡️ GAP 1 RESOLUTION: MAXIMUM ALLOWABLE SPREAD FILTER (S_max)
+    # Prevents broker Virtual Dealer Plugin / markup from destroying the 0.30% TP margin
+    # S_max = TP% - dynamic_slippage(5 bps) - commission(2 bps) - hurdle_rate(5 bps) = 18 bps
+    spread = tick.ask - tick.bid
+    mid_price = (tick.ask + tick.bid) / 2.0
+    spread_pct = spread / mid_price if mid_price > 0 else 0.0
+    max_allowable_spread = max(0.0005, target_tp_pct - 0.0012) # 18 bps ceiling
+
+    if spread_pct > max_allowable_spread:
+        print(f"🛑 [SPREAD SHIELD ACTIVATED] Current spread ({spread_pct*10000:.1f} bps / ${spread:.2f}) exceeds S_max ({max_allowable_spread*10000:.1f} bps).", flush=True)
+        print("⚠️ Broker synthetic markup detected! Rejecting order to prevent negative mathematical expectancy.", flush=True)
+        return False
+
     # Price & SL/TP
     if action == "BUY":
         order_type = mt5.ORDER_TYPE_BUY
