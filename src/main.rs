@@ -360,7 +360,11 @@ pub async fn run_ai_optimizer(shared_params: Arc<RwLock<DynamicParams>>) {
 
 // 🚀 MAIN TRADING ENGINE — HARDENED EDITION
 pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
-    let url = "wss://stream.binance.com:9443/ws/ethusdt@bookTicker";
+    let urls = [
+        "wss://data-stream.binance.vision/ws/ethusdt@bookTicker",
+        "wss://stream.binance.com/ws/ethusdt@bookTicker",
+        "wss://stream.binance.com:9443/ws/ethusdt@bookTicker",
+    ];
 
     // 💾 Load State ONCE before reconnect loop
     let state = load_state();
@@ -384,11 +388,12 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
     };
     let min_holding_duration = std::time::Duration::from_secs(125); // ⚡ Prop Firm Anti-HFT Rule: > 2 mins minimum holding time
 
-    // ♻️ EDGE CASE #1: WSS DISCONNECT AUTO-RECONNECT LOOP
+    // ♻️ EDGE CASE #1: WSS DISCONNECT AUTO-RECONNECT & MULTI-GATEWAY FAILOVER LOOP
     loop {
-        match connect_async(url).await {
+        let current_url = urls[reconnect_attempts as usize % urls.len()];
+        match connect_async(current_url).await {
             Ok((ws_stream, _)) => {
-                info!("🌐 [WSS] Connected to Binance Live Feed (Attempt #{})", reconnect_attempts + 1);
+                info!("🌐 [WSS] Connected to Binance Live Feed via {} (Attempt #{})", current_url, reconnect_attempts + 1);
                 reconnect_attempts = 0; // Reset on success
                 let (_, mut read) = ws_stream.split();
 
