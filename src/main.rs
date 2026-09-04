@@ -171,6 +171,7 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
     let mut is_trading = false;
     let mut reconnect_attempts: u32 = 0;
     let mut last_sell_time = std::time::Instant::now() - std::time::Duration::from_secs(120); // Cooldown tracker
+    let mut consecutive_losses: u32 = 0; // ⚡ Streak breaker: pauses 15 min on 2 consecutive losses
 
     // ♻️ EDGE CASE #1: WSS DISCONNECT AUTO-RECONNECT LOOP
     loop {
@@ -240,11 +241,22 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                         return; // Full stop — don't reconnect
                                     }
 
-                                    // 🟢 BUY LOGIC — COMPETITION HARDENED & CALIBRATED
-                                    let cooldown_passed = last_sell_time.elapsed() >= std::time::Duration::from_secs(60);
+                                    // 🟢 BUY LOGIC — INSTITUTIONAL STREAK & DIP HARDENED
+                                    let cooldown_duration = if consecutive_losses >= 2 {
+                                        std::time::Duration::from_secs(900) // ⚡ 15-Minute Trend Defense Pause on 2 consecutive losses
+                                    } else {
+                                        std::time::Duration::from_secs(90)  // 90s Standard Cooldown
+                                    };
+
+                                    let cooldown_passed = last_sell_time.elapsed() >= cooldown_duration;
                                     if eth_balance == 0.0 && !is_trading && cooldown_passed {
-                                        let pure_dip = z_score <= -z_thresh && std_dev > std_thresh;
-                                        let sentiment_dip = nlp_score >= 0.5 && z_score <= 0.0; // Never buy at peak pump!
+                                        // 🛡️ STRICT REVERSAL FILTER:
+                                        // 1. Must have active volatility (std_dev >= 0.5) to avoid flat market noise
+                                        // 2. Pure dip requires extreme statistical oversold (Z <= -2.0)
+                                        // 3. Sentiment dip also requires Z <= -1.8 (Never buy falling knives in a cascade!)
+                                        let has_healthy_volatility = std_dev >= 0.5;
+                                        let pure_dip = z_score <= -2.0 && has_healthy_volatility;
+                                        let sentiment_dip = nlp_score >= 0.5 && z_score <= -1.8 && has_healthy_volatility;
 
                                         if pure_dip || sentiment_dip {
                                             is_trading = true;
@@ -338,8 +350,19 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                             buy_price = 0.0;
 
                                             let exit_reason = if profit_margin >= tp {
+                                                consecutive_losses = 0; // 🎯 Reset streak on win!
                                                 "🎯 Target Reached (Take-Profit Hit)"
                                             } else if profit_margin <= stop_loss_pct {
+                                                consecutive_losses += 1;
+                                                if consecutive_losses >= 2 {
+                                                    tokio::spawn(send_telegram_alert(
+                                                        "⚠️ [TREND DEFENSE ENGAGED]\n\
+                                                        ━━━━━━━━━━━━━━━━━━━━\n\
+                                                        🛑 2 Consecutive Stop-Losses detected (Market is dumping).\n\
+                                                        ⏳ Pausing all new entries for 15 minutes to avoid falling knives.\n\
+                                                        ━━━━━━━━━━━━━━━━━━━━".to_string()
+                                                    ));
+                                                }
                                                 "🛑 Strict Stop-Loss (Capital Preserved)"
                                             } else {
                                                 "⚡ AI Sentiment Reversal Signal"
