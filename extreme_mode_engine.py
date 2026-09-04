@@ -156,5 +156,10 @@ async def stream_feed(symbol="ethusdt"):
                 await asyncio.sleep(2)
                 break
 
+async def main():
+    symbols = ["ethusdt", "btcusdt", "solusdt", "bnbusdt"]
+    print(f"\n{CYAN}🛡️ [EXTREME-MODE QUANT] Spawning 4-Coin Concurrent Multi-Stream: {symbols}{RESET}")
+    await asyncio.gather(*(stream_feed(s) for s in symbols))
+
 if __name__ == "__main__":
-    asyncio.run(stream_feed("ethusdt"))
+    asyncio.run(main())

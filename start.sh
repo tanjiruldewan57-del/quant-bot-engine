@@ -12,6 +12,7 @@ python3 whale_tracker.py &
 # (আপনার যদি nlp_engine.py বা অন্যান্য বট রেডি থাকে, তবে সেগুলোর নামও নিচে দিতে পারেন)
 # python3 nlp_engine.py &
 python3 extreme_mode_engine.py &
+python3 spot_arbitrage_scanner.py &
 
 # 3. Give the Microservices 2 seconds to warm up
 sleep 2
