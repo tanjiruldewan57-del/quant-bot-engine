@@ -114,6 +114,41 @@ impl ComplianceGate {
     }
 }
 
+// 🌊 WATERFALL CRASH & DENOMINATOR EXPLOSION SHIELD
+pub fn is_waterfall_crash(history: &[f64], _win_size: usize) -> bool {
+    if history.len() < 5 {
+        return false;
+    }
+    let n = history.len();
+
+    // 1. Monotonic downward acceleration over the last 5 ticks
+    let last_5 = &history[n - 5..];
+    let mut strictly_falling = true;
+    for i in 1..5 {
+        if last_5[i] >= last_5[i - 1] {
+            strictly_falling = false;
+            break;
+        }
+    }
+    if strictly_falling {
+        let velocity = (last_5[4] - last_5[0]) / last_5[0];
+        // > 0.3% uninterrupted drop across 5 ticks indicates waterfall liquidation
+        if velocity < -0.003 {
+            return true;
+        }
+    }
+
+    // 2. Cumulative markdown across available rolling window
+    let oldest = history[0];
+    let newest = history[n - 1];
+    let total_drop = (newest - oldest) / oldest;
+    if total_drop < -0.015 && history[n - 1] <= history[n - 2] {
+        return true;
+    }
+
+    false
+}
+
 // 📡 MASTER SIGNAL AGGREGATOR
 pub async fn start_master_signal_aggregator(shared_params: Arc<RwLock<DynamicParams>>) {
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:5000")
@@ -342,6 +377,12 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
     let mut reconnect_attempts: u32 = 0;
     let mut last_sell_time = std::time::Instant::now() - std::time::Duration::from_secs(120); // Cooldown tracker
     let mut consecutive_losses: u32 = 0; // ⚡ Streak breaker: pauses 15 min on 2 consecutive losses
+    let mut buy_time: Option<std::time::Instant> = if eth_balance > 0.0 {
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(130)) // If state resumed with position, assume matured
+    } else {
+        None
+    };
+    let min_holding_duration = std::time::Duration::from_secs(125); // ⚡ Prop Firm Anti-HFT Rule: > 2 mins minimum holding time
 
     // ♻️ EDGE CASE #1: WSS DISCONNECT AUTO-RECONNECT LOOP
     loop {
@@ -428,7 +469,13 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                         let pure_dip = z_score <= -z_thresh && has_healthy_volatility;
                                         let sentiment_dip = nlp_score >= 0.5 && z_score <= -(z_thresh - 0.2).max(1.8) && has_healthy_volatility;
 
-                                        if pure_dip || sentiment_dip {
+                                        // 🌊 WATERFALL & DENOMINATOR EXPLOSION SHIELD
+                                        let waterfall_in_progress = is_waterfall_crash(&price_history, win_size);
+                                        if waterfall_in_progress && (pure_dip || sentiment_dip) {
+                                            warn!("🛑 [WATERFALL DEFENSE] Continuous markdown detected! Blocking falling-knife buy entry.");
+                                        }
+
+                                        if (pure_dip || sentiment_dip) && !waterfall_in_progress {
                                             is_trading = true;
                                             let gate = ComplianceGate::new();
                                             if gate.check_trade_validity("ETHUSDT", "BUY", false) {
@@ -448,6 +495,7 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                                 eth_balance = (trade_amount / ask_price) * 0.999;
                                                 usdt_balance -= trade_amount;
                                                 buy_price = ask_price;
+                                                buy_time = Some(std::time::Instant::now());
                                                 let target_tp = ask_price * (1.0 + tp);
                                                 let target_sl = ask_price * (1.0 - 0.003);
 
@@ -486,6 +534,20 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                                 save_state(eth_balance, usdt_balance, buy_price);
                                                 tokio::spawn(send_telegram_alert(msg.clone()));
 
+                                                // 📡 UDP Broadcast to Local Stealth Executor (mt5_stealth_trader.py)
+                                                let buy_payload = serde_json::json!({
+                                                    "action": "BUY",
+                                                    "symbol": "ETHUSD",
+                                                    "price": ask_price,
+                                                    "tp_pct": tp,
+                                                    "sl_pct": 0.003,
+                                                    "amount_usd": trade_amount,
+                                                    "timestamp": chrono::Utc::now().to_rfc3339()
+                                                });
+                                                if let Ok(sock) = tokio::net::UdpSocket::bind("0.0.0.0:0").await {
+                                                    let _ = sock.send_to(buy_payload.to_string().as_bytes(), "127.0.0.1:5002").await;
+                                                }
+
                                                 let log = format!("BUY,{},{:.2},{:.4},{:.2}\n",
                                                     chrono::Utc::now().to_rfc3339(), ask_price, eth_balance, usdt_balance);
                                                 if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("trades.csv") {
@@ -502,10 +564,18 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                         let profit_margin = (bid_price - buy_price) / buy_price;
                                         let stop_loss_pct = -0.003;
 
-                                        // ⚡ EDGE CASE #6: NLP bearish exit only if holding > 30s (avoids flash crash noise)
+                                        // ⚡ EDGE CASE #6: NLP bearish exit
                                         let sentiment_exit = nlp_score <= -0.5;
 
-                                        if profit_margin >= tp || profit_margin <= stop_loss_pct || sentiment_exit {
+                                        // 🛡️ PROP FIRM ANTI-HFT MINIMUM HOLDING RULE (> 2 mins required by Alpha Capital/FundedNext)
+                                        let holding_duration = buy_time.map(|t| t.elapsed()).unwrap_or(std::time::Duration::from_secs(999));
+                                        let holding_time_cleared = holding_duration >= min_holding_duration;
+                                        let is_emergency_stop = profit_margin <= stop_loss_pct;
+
+                                        let should_take_profit = profit_margin >= tp && holding_time_cleared;
+                                        let should_sentiment_exit = sentiment_exit && holding_time_cleared;
+
+                                        if should_take_profit || is_emergency_stop || should_sentiment_exit {
                                             is_trading = true;
                                             if sentiment_exit {
                                                 let mut pw = shared_params.write().await;
@@ -564,6 +634,20 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                             warn!("{}", msg);
                                             save_state(eth_balance, usdt_balance, buy_price);
                                             tokio::spawn(send_telegram_alert(msg.clone()));
+
+                                            // 📡 UDP Broadcast to Local Stealth Executor (mt5_stealth_trader.py)
+                                            let sell_payload = serde_json::json!({
+                                                "action": "SELL",
+                                                "symbol": "ETHUSD",
+                                                "price": bid_price,
+                                                "profit_pct": profit_pct,
+                                                "reason": exit_reason,
+                                                "timestamp": chrono::Utc::now().to_rfc3339()
+                                            });
+                                            if let Ok(sock) = tokio::net::UdpSocket::bind("0.0.0.0:0").await {
+                                                let _ = sock.send_to(sell_payload.to_string().as_bytes(), "127.0.0.1:5002").await;
+                                            }
+                                            buy_time = None;
 
                                             let log = format!("SELL,{},{:.2},{:.4},{:.2}\n",
                                                 chrono::Utc::now().to_rfc3339(), bid_price, eth_balance, usdt_balance);
@@ -710,5 +794,22 @@ mod tests {
         assert_eq!(clamped_z, 2.0);
         assert_eq!(clamped_std, 0.5);
         assert_eq!(clamped_tp, 0.005);
+    }
+
+    #[test]
+    fn test_waterfall_crash_filter() {
+        // Continuous falling markdown (Waterfall crash)
+        let waterfall_series = vec![100.0, 99.4, 98.8, 98.2, 97.5, 96.8];
+        assert!(
+            is_waterfall_crash(&waterfall_series, 20),
+            "🚨 FAILED: Waterfall crash was not detected!"
+        );
+
+        // Healthy mean-reverting fluctuating series
+        let healthy_series = vec![98.0, 98.5, 98.1, 98.7, 98.3, 98.9];
+        assert!(
+            !is_waterfall_crash(&healthy_series, 20),
+            "🚨 FAILED: Healthy fluctuating market was flagged as crash!"
+        );
     }
 }
