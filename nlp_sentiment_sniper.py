@@ -4,50 +4,33 @@ import json
 import time
 import socket
 import asyncio
-from typing import Tuple
-
-# Load from .env if available
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+import urllib.request
+import xml.etree.ElementTree as ET
+from typing import Tuple, List, Set
 
 # ==========================================
-# 🛡️ CREDENTIAL CONFIGURATION (GHOST-MODE)
+# 🛡️ 100% ZERO-LOGIN PUBLIC ALPHA FEED CONFIG
 # ==========================================
-# API_ID and API_HASH should be placed inside a .env file:
-# TELEGRAM_API_ID=12345678
-# TELEGRAM_API_HASH=abcdef1234567890abcdef1234567890
-API_ID = os.getenv("TELEGRAM_API_ID", "").strip()
-API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
+# No personal accounts, no phone numbers, no Telegram sessions needed!
+# Pure public cryptographic orderflow & announcement feeds.
 
-# Target Telegram Channels to Monitor for Breaking Crypto Alpha
-TARGET_CHANNELS = [
-    "TreeNewsFeed",           # Institutional lightning fast news
-    "binance_announcements",  # Binance listing/delisting alerts
-    "tier10k",                # Up-to-the-second financial news
-    "cointelegraph",          # Major crypto headlines
-]
-
-# UDP Destination (Rust Master Aggregator Engine)
 RUST_UDP_HOST = "127.0.0.1"
 RUST_UDP_PORT = 5000
 
 udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-def broadcast_signal_to_rust(headline: str, sentiment_score: float, source: str = "TELEGRAM_SNIPER"):
-    """Transmits high-priority sentiment payload to Rust Core via 0.01ms UDP socket."""
+def broadcast_signal_to_rust(headline: str, sentiment_score: float, source: str = "PUBLIC_ALPHA_FEED"):
+    """Transmits high-priority sentiment payload to Rust Core via 0.01ms local UDP."""
     payload = {
         "source": source,
         "timestamp": time.time(),
-        "headline": headline[:100],  # Keep packet compact
+        "headline": headline[:100],
         "sentiment_score": round(sentiment_score, 2)
     }
     try:
         data = json.dumps(payload).encode("utf-8")
         udp_sock.sendto(data, (RUST_UDP_HOST, RUST_UDP_PORT))
-        print(f"⚡ [NLP SENT TO RUST] Score: {sentiment_score:+.2f} | Headline: {headline[:60]}...", flush=True)
+        print(f"\n⚡ [NLP SENT TO RUST] Score: {sentiment_score:+.2f} | Headline: {headline[:65]}...", flush=True)
     except Exception as e:
         print(f"⚠️ [UDP ERROR] Could not reach Rust engine: {e}", flush=True)
 
@@ -65,12 +48,12 @@ BULLISH_TRIGGERS = {
     "invested": 0.65,
     "acquisition": 0.75,
     "acquired": 0.75,
-    "integration": 0.60,
-    "mainnet launch": 0.75,
+    "mainnet": 0.70,
     "upgrade": 0.55,
     "surge": 0.50,
     "expansion": 0.55,
     "collaboration": 0.60,
+    "spot etf": 0.90,
 }
 
 BEARISH_TRIGGERS = {
@@ -93,66 +76,114 @@ BEARISH_TRIGGERS = {
 }
 
 def analyze_sentiment(text: str) -> Tuple[float, str]:
-    """Analyzes raw headline text and outputs sentiment score [-1.0 to +1.0] and matched reason."""
     cleaned = text.lower()
     bullish_hits = [k for k in BULLISH_TRIGGERS if k in cleaned]
     bearish_hits = [k for k in BEARISH_TRIGGERS if k in cleaned]
 
     if bullish_hits and not bearish_hits:
         highest_weight = max(BULLISH_TRIGGERS[k] for k in bullish_hits)
-        return highest_weight, f"BULLISH: {', '.join(bullish_hits)}"
+        return highest_weight, f"BULLISH ({', '.join(bullish_hits)})"
     elif bearish_hits and not bullish_hits:
         lowest_weight = min(BEARISH_TRIGGERS[k] for k in bearish_hits)
-        return lowest_weight, f"BEARISH: {', '.join(bearish_hits)}"
+        return lowest_weight, f"BEARISH ({', '.join(bearish_hits)})"
     elif bullish_hits and bearish_hits:
-        # Conflicting signals -> Neutral defense
-        return 0.0, "CONFLICTING_SIGNALS"
+        return 0.0, "CONFLICTING"
     
     return 0.0, "NEUTRAL"
 
 # ==========================================
-# 🚀 TELETHON LIVE STREAM WORKER
+# 📡 PUBLIC MULTI-FEED MONITOR
 # ==========================================
-async def start_telethon_listener():
+# High-speed public institutional sources that require zero authentication
+FEEDS = [
+    {"name": "CoinTelegraph Public RSS", "url": "https://cointelegraph.com/rss", "type": "rss"},
+    {"name": "CoinDesk Alpha RSS", "url": "https://www.coindesk.com/arc/outboundfeeds/rss/", "type": "rss"},
+    {"name": "CryptoPanic Public Feed", "url": "https://cryptopanic.com/api/free/v1/posts/?auth_token=free&public=true", "type": "json"},
+]
+
+seen_headlines: Set[str] = set()
+
+def fetch_rss_headlines(feed_url: str) -> List[str]:
+    headlines = []
     try:
-        from telethon import TelegramClient, events
-    except ImportError:
-        print("⚠️ [DEPENDENCY MISSING] Telethon not installed. Run: pip install telethon python-dotenv", flush=True)
-        print("⏳ Running NLP Sniper in Standby Heartbeat Mode...", flush=True)
-        while True:
-            await asyncio.sleep(60)
+        req = urllib.request.Request(feed_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=4) as response:
+            xml_data = response.read()
+            root = ET.fromstring(xml_data)
+            for item in root.findall(".//item")[:10]:
+                title = item.find("title")
+                if title is not None and title.text:
+                    headlines.append(title.text.strip())
+    except Exception:
+        pass
+    return headlines
 
-    if not API_ID or not API_HASH:
-        print("⚠️ [CONFIGURATION NOTICE] TELEGRAM_API_ID or TELEGRAM_API_HASH is missing in .env file.", flush=True)
-        print("💡 Place them in .env safely. Standby mode active...", flush=True)
-        while True:
-            await asyncio.sleep(60)
+def fetch_json_headlines(feed_url: str) -> List[str]:
+    headlines = []
+    try:
+        req = urllib.request.Request(feed_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=4) as response:
+            data = json.loads(response.read().decode())
+            results = data.get("results", [])
+            for post in results[:10]:
+                title = post.get("title")
+                if title:
+                    headlines.append(title.strip())
+    except Exception:
+        pass
+    return headlines
 
-    print("🛡️ [TELETHON INITIALIZING] Connecting to Telegram Secure MTProto Gateway...", flush=True)
-    session_name = "nlp_sniper_session"
-    client = TelegramClient(session_name, int(API_ID), API_HASH)
+async def public_news_sniper_loop():
+    print("====================================================")
+    print("🎯 ZERO-LOGIN PUBLIC CRYPTO NEWS SNIPER ACTIVE")
+    print("🔒 100% Privacy Guaranteed | Zero Credentials Required")
+    print("📡 Monitoring: CoinTelegraph, CoinDesk, CryptoPanic")
+    print("⚡ Realtime Output Bus -> Rust Core UDP 127.0.0.1:5000")
+    print("====================================================", flush=True)
 
-    @client.on(events.NewMessage(chats=TARGET_CHANNELS))
-    async def incoming_news_handler(event):
-        text = event.raw_text
-        if not text:
-            return
-        
-        score, reason = analyze_sentiment(text)
-        print(f"\n📰 [INCOMING NEWS] {time.strftime('%X')}: {text[:70]}...", flush=True)
-        print(f"📊 [ANALYSIS] Score: {score:+.2f} | Reason: {reason}", flush=True)
+    # Initial priming to avoid triggering old news
+    print("⏳ Priming memory with existing headlines...", flush=True)
+    for feed in FEEDS:
+        if feed["type"] == "rss":
+            items = fetch_rss_headlines(feed["url"])
+        else:
+            items = fetch_json_headlines(feed["url"])
+        for h in items:
+            seen_headlines.add(h)
+    
+    print(f"✅ [PRIMED] {len(seen_headlines)} historical headlines memorized. Now hunting NEW breaking alpha!", flush=True)
 
-        if score >= 0.5 or score <= -0.5:
-            broadcast_signal_to_rust(text, score, source="TELEGRAM_LIVE_SNIPER")
+    while True:
+        try:
+            for feed in FEEDS:
+                if feed["type"] == "rss":
+                    current_items = fetch_rss_headlines(feed["url"])
+                else:
+                    current_items = fetch_json_headlines(feed["url"])
 
-    await client.start()
-    print("✅ [NLP SNIPER ACTIVE] Listening 24/7 to breaking crypto alpha channels!", flush=True)
-    await client.run_until_disconnected()
+                for title in current_items:
+                    if title not in seen_headlines:
+                        seen_headlines.add(title)
+                        score, reason = analyze_sentiment(title)
+                        timestamp_str = time.strftime("%X")
+                        
+                        if score != 0.0:
+                            print(f"\n🔥 [BREAKING ALPHA - {feed['name']}] {timestamp_str}")
+                            print(f"📰 {title}")
+                            print(f"📊 Signal: {score:+.2f} | Reason: {reason}", flush=True)
+
+                        # If high impact, fire immediately to Rust Core
+                        if score >= 0.5 or score <= -0.5:
+                            broadcast_signal_to_rust(title, score, source=feed["name"])
+
+            # Keep cache bounded to 2000 items to conserve RAM
+            if len(seen_headlines) > 2000:
+                seen_headlines.clear()
+
+        except Exception as e:
+            print(f"⚠️ [MONITOR NOTICE] Stream tick caught: {e}", flush=True)
+
+        await asyncio.sleep(3)  # Fast 3-second cycle
 
 if __name__ == "__main__":
-    print("====================================================")
-    print("🎯 HALAL NLP SENTIMENT SNIPER (BOT 2) INITIALIZED")
-    print("📡 Targets: Institutional Alpha & Announcement Feeds")
-    print("🔒 Zero Data Leakage | Local UDP Bus -> Rust Core")
-    print("====================================================")
-    asyncio.run(start_telethon_listener())
+    asyncio.run(public_news_sniper_loop())
