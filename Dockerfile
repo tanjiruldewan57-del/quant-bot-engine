@@ -1,8 +1,8 @@
 # 🟢 THE SECURE BLACK BOX (Prop Firm Edition)
-FROM rust:1.80-slim as builder
+FROM rust:latest as builder
 
-# Install Python & Dependencies (Including numpy and websockets for Extreme Mode)
-RUN apt-get update && apt-get install -y python3 python3-pip
+# Install Python & System Dependencies (Including OpenSSL, numpy, websockets)
+RUN apt-get update && apt-get install -y python3 python3-pip pkg-config libssl-dev
 RUN pip3 install --break-system-packages requests websocket-client fastapi uvicorn nltk numpy websockets
 
 # Security: Non-root unprivileged appuser (UID 8888) - True Ghost Mode
