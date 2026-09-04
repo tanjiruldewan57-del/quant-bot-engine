@@ -223,12 +223,14 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                 is_trading = true;
                                 let gate = ComplianceGate::new();
                                 if gate.check_trade_validity("ETHUSDT", "BUY", false) {
-                                    if nlp_score >= 0.5 {
+                                    let is_sentiment_trigger = nlp_score >= 0.5;
+                                    if is_sentiment_trigger {
                                         let mut pw = shared_params.write().await;
                                         pw.nlp_sentiment = 0.0;
                                         nlp_score = 0.0;
                                     }
-                                    let trade_amount = (usdt_balance - 97_000.0).max(0.0);
+                                    let active_buffer = (usdt_balance - 97_000.0).max(0.0);
+                                    let trade_amount = (active_buffer * 0.35).clamp(50.0, 1500.0);
                                     if trade_amount < 10.0 {
                                         warn!("🛑 [RISK MANAGER] Active buffer depleted (Trade < $10). Trade rejected.");
                                         is_trading = false;
@@ -237,15 +239,51 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                     eth_balance = (trade_amount / ask_price) * 0.999;
                                     usdt_balance -= trade_amount;
                                     buy_price = ask_price;
+                                    let target_tp = ask_price * (1.0 + tp);
+                                    let target_sl = ask_price * (1.0 - 0.003);
+
+                                    let entry_reason = if is_sentiment_trigger {
+                                        "NLP Sentiment Sniper + Institutional Order Flow"
+                                    } else {
+                                        "O-U Mean-Reversion (Extreme Statistical Dip)"
+                                    };
 
                                     let msg = format!(
-                                        "🟢 [PAPER BUY] ETH at ${:.2} | USDT: ${:.2}",
-                                        ask_price, usdt_balance
+                                        "🟢 [INSTITUTIONAL QUANT BUY SIGNAL]\n\
+                                        ━━━━━━━━━━━━━━━━━━━━\n\
+                                        🎯 Asset: ETH/USDT (Spot | Halal)\n\
+                                        💵 Entry Price: ${:.2}\n\
+                                        🎯 Target (TP +{:.1}%): ${:.2}\n\
+                                        🛑 Stop Loss (SL -0.3%): ${:.2}\n\
+                                        💰 Order Size: ${:.2} USDT ({:.4} ETH)\n\
+                                        \n\
+                                        📊 Market Research & Triggers:\n\
+                                        • Strategy: {}\n\
+                                        • Z-Score: {:.2} (Mean-Reversion Dip)\n\
+                                        • Volatility: {:.4}\n\
+                                        • Compliance: 100% Spot Qabd Hukmi\n\
+                                        \n\
+                                        🛡️ Capital & Risk Health:\n\
+                                        • Available USDT: ${:.2}\n\
+                                        • Grossman-Zhou Floor: $97,000.00\n\
+                                        • Active Risk Buffer: ${:.2}\n\
+                                        ━━━━━━━━━━━━━━━━━━━━",
+                                        ask_price,
+                                        tp * 100.0,
+                                        target_tp,
+                                        target_sl,
+                                        trade_amount,
+                                        eth_balance,
+                                        entry_reason,
+                                        z_score,
+                                        std_dev,
+                                        usdt_balance,
+                                        (usdt_balance - 97_000.0).max(0.0)
                                     );
                                     warn!("{}", msg);
                                     save_state(eth_balance, usdt_balance, buy_price);
 
-                                    // 📱 Send to Telegram (Runs in background, no lag)
+                                    // 📱 Send rich institutional signal to Telegram
                                     tokio::spawn(send_telegram_alert(msg.clone()));
 
                                     let log = format!(
@@ -271,24 +309,65 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                         // 🔴 SELL LOGIC
                         if eth_balance > 0.0 && buy_price > 0.0 && !is_trading {
                             let profit_margin = (bid_price - buy_price) / buy_price;
-                            if profit_margin >= tp || nlp_score <= -0.5 {
+                            let stop_loss = -0.003;
+                            if profit_margin >= tp || profit_margin <= stop_loss || nlp_score <= -0.5 {
                                 is_trading = true;
                                 if nlp_score <= -0.5 {
                                     let mut pw = shared_params.write().await;
                                     pw.nlp_sentiment = 0.0;
                                 }
-                                usdt_balance += (eth_balance * bid_price) * 0.999;
+                                let sell_return = (eth_balance * bid_price) * 0.999;
+                                let profit_dollar = (bid_price - buy_price) * eth_balance;
+                                let profit_pct = profit_margin * 100.0;
+                                usdt_balance += sell_return;
+                                let saved_buy_price = buy_price;
                                 eth_balance = 0.0;
                                 buy_price = 0.0;
 
+                                let exit_reason = if profit_margin >= tp {
+                                    "🎯 Target Reached (Take-Profit Hit)"
+                                } else if profit_margin <= stop_loss {
+                                    "🛑 Strict Stop-Loss (Capital Preserved)"
+                                } else {
+                                    "⚡ AI Sentiment Reversal Signal"
+                                };
+
+                                let pnl_header = if profit_dollar >= 0.0 {
+                                    "📈 PROFIT REALIZED"
+                                } else {
+                                    "📉 LOSS CUT (SAFETY DEFENSE)"
+                                };
+
                                 let msg = format!(
-                                    "🔴 [PAPER SELL] ETH at ${:.2} | USDT: ${:.2}",
-                                    bid_price, usdt_balance
+                                    "🔴 [INSTITUTIONAL QUANT SELL SIGNAL]\n\
+                                    ━━━━━━━━━━━━━━━━━━━━\n\
+                                    🎯 Asset: ETH/USDT (Position Closed)\n\
+                                    💵 Entry Price: ${:.2} | Exit Price: ${:.2}\n\
+                                    {} Realized P/L: {:+.2}$ ({:+.2}%)\n\
+                                    \n\
+                                    📊 Trade Research & Summary:\n\
+                                    • Exit Trigger: {}\n\
+                                    • Settlement: 100% Cash Settled (Zero Swap)\n\
+                                    • Halal Status: No Overnight Riba / Pure Spot\n\
+                                    \n\
+                                    💼 Updated Portfolio Balance:\n\
+                                    • Total USDT Balance: ${:.2}\n\
+                                    • Grossman-Zhou Floor: $97,000.00\n\
+                                    • Net Active Cushion: ${:.2}\n\
+                                    ━━━━━━━━━━━━━━━━━━━━",
+                                    saved_buy_price,
+                                    bid_price,
+                                    pnl_header,
+                                    profit_dollar,
+                                    profit_pct,
+                                    exit_reason,
+                                    usdt_balance,
+                                    (usdt_balance - 97_000.0).max(0.0)
                                 );
                                 warn!("{}", msg);
                                 save_state(eth_balance, usdt_balance, buy_price);
 
-                                // 📱 Send to Telegram (Runs in background, no lag)
+                                // 📱 Send rich institutional signal to Telegram
                                 tokio::spawn(send_telegram_alert(msg.clone()));
 
                                 let log = format!(
