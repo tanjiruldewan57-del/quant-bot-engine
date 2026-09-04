@@ -19,4 +19,8 @@ sleep 2
 
 # 4. Start the Rust Master Execution Engine (Runs in foreground to keep server alive)
 echo "🛡️ Starting Rust Master Engine..."
-cargo run --release --bin quant_engine
+if [ -f "./target/release/quant_engine" ]; then
+    ./target/release/quant_engine
+else
+    cargo run --release --bin quant_engine
+fi

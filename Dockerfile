@@ -11,10 +11,12 @@ RUN groupadd -g 8888 appuser && \
 
 WORKDIR /quant_engine
 COPY . .
-RUN chown -R appuser:appuser /quant_engine
 
 # Compile Rust Engine to an impenetrable Binary
 RUN cargo build --release --bin quant_engine
+
+# Give appuser ownership of all files and compiled binaries
+RUN chmod +x start.sh && chown -R appuser:appuser /quant_engine
 
 USER appuser
 
