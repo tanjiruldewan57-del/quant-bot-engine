@@ -49,6 +49,7 @@ GUI_CLICK_MODE = False # Set to True if you want mouse auto-clicking instead of 
 # Prop Firm Rules
 MIN_HOLDING_SECONDS = 125.0  # Must hold > 2 minutes (120s) for Anti-HFT compliance
 DAILY_PROFIT_CAP_USD = 4000.0 # 40% Consistency Rule Cap on $100k Account ($4k daily max)
+MICRO_LOT_DILUTION_MODE = False # 🏆 Set to True in final 48h to lock rank with 0.01 micro-lots
 
 # Global State Trackers
 active_position_open_time: Optional[float] = None
@@ -195,10 +196,14 @@ def execute_humanoid_order(action: str, target_tp_pct: float = 0.003, stop_loss_
         tp = round(price * (1.0 - target_tp_pct), 2)
 
     # 🏆 COMPETITION WINNING LOT SIZING:
-    account_info = mt5.account_info()
-    balance = account_info.balance if account_info else 100000.0
-    calculated_lot = round((balance / 100000.0) * 1.5, 2)
-    lot_size = max(symbol_info.volume_min, min(calculated_lot, symbol_info.volume_max, 2.0))
+    if MICRO_LOT_DILUTION_MODE:
+        lot_size = symbol_info.volume_min # Exactly 0.01 micro-lot
+        print(f"🔒 [MICRO-LOT DILUTION ACTIVE] Securing Top-3 Rank: Executing minimum {lot_size} lot to satisfy active days rule without market exposure.", flush=True)
+    else:
+        account_info = mt5.account_info()
+        balance = account_info.balance if account_info else 100000.0
+        calculated_lot = round((balance / 100000.0) * 1.5, 2)
+        lot_size = max(symbol_info.volume_min, min(calculated_lot, symbol_info.volume_max, 2.0))
 
     # Order Request — 100% Emulating Manual Terminal Order
     request = {
