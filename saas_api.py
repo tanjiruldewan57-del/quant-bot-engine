@@ -68,6 +68,6 @@ def get_active_signals():
     }
 
 if __name__ == "__main__":
-    # পোর্ট 8000 এ রান করবে
-    print("🚀 [SaaS API] Booting up B2B Productization Server...")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.getenv("PORT", 8000))
+    print(f"🚀 [SaaS API] Booting up B2B Productization Server on 0.0.0.0:{port}...")
+    uvicorn.run(app, host="0.0.0.0", port=port)

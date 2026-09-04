@@ -7,6 +7,13 @@ echo "======================================================"
 # 📁 Ensure log directory exists
 mkdir -p logs
 
+# 🌐 Start SaaS API & Health Check Endpoint (Render Port Binding)
+echo "🌐 Starting SaaS API Health Check Endpoint on Port ${PORT:-8000}..."
+python3 saas_api.py >> logs/saas_api.log 2>&1 &
+SAAS_PID=$!
+echo "  ✅ SaaS API PID: $SAAS_PID"
+sleep 1
+
 # ⚡ LOAD BALANCING: Start microservices with staggered delays
 # to prevent all of them hitting UDP port 5000 simultaneously
 

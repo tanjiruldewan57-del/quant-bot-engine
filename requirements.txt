@@ -4,3 +4,5 @@ websockets
 numpy
 reqwest
 aiohttp
+fastapi
+uvicorn
