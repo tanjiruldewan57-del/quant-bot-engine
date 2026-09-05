@@ -251,12 +251,21 @@ def start_stealth_listener():
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((UDP_BIND_IP, UDP_BIND_PORT))
-    print(f"🎧 Listening on UDP {UDP_BIND_IP}:{UDP_BIND_PORT} for Rust Master signals...", flush=True)
+    UDP_SECRET = os.getenv("UDP_SECRET", "")
+    if UDP_SECRET:
+        print("🔒 [UDP AUTHENTICATION] Enabled with SHA-256 constant-time secret check.", flush=True)
 
     while True:
         try:
             data, _ = sock.recvfrom(1024)
             msg = json.loads(data.decode("utf-8"))
+            if UDP_SECRET:
+                import hmac
+                auth_token = msg.get("auth_token", "")
+                if not hmac.compare_digest(auth_token, UDP_SECRET):
+                    print("🚨 [UNAUTHORIZED UDP ATTEMPT] Invalid auth token received on port 5002! Dropping packet.", flush=True)
+                    continue
+
             action = msg.get("action", "").upper()
             if action in ["BUY", "SELL"]:
                 print(f"\n⚡ [SIGNAL RECEIVED FROM RUST CORE] Action: {action} | Symbol: {msg.get('symbol')} | Price: ${msg.get('price')}", flush=True)

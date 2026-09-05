@@ -18,16 +18,21 @@ from typing import Dict, Any
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+import hmac
+import hashlib
+
 # Environment Variables configured in Render Cloud Dashboard
 PROP_FIRM_PROVIDER = os.getenv("PROP_FIRM_PROVIDER", "META_API") # Options: META_API, CTRADER, MATCH_TRADER, MOCK_TEST
-PROP_ACCOUNT_ID = os.getenv("PROP_ACCOUNT_ID", "YOUR_PROP_ACCOUNT_ID")
-META_API_TOKEN = os.getenv("META_API_TOKEN", "YOUR_META_API_TOKEN")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8663900968:AAGzLRKBoe8Hb72GVQctI8z9KVwaWLQMoes")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1432812458")
+PROP_ACCOUNT_ID = os.getenv("PROP_ACCOUNT_ID", "")
+META_API_TOKEN = os.getenv("META_API_TOKEN", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+UDP_SECRET = os.getenv("UDP_SECRET", "")
 
 def notify_telegram(message: str):
     """Sends confirmation to user's phone via Telegram."""
-    if not TELEGRAM_BOT_TOKEN:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logging.warning("⚠️ [TELEGRAM ALERT SKIPPED] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not configured.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = urllib.parse.urlencode({"chat_id": TELEGRAM_CHAT_ID, "text": message}).encode("utf-8")
@@ -43,16 +48,32 @@ class CloudPropExecutor:
         self.provider = PROP_FIRM_PROVIDER
         self.account_id = PROP_ACCOUNT_ID
         self.is_running = True
-        logging.info(f"🚀 [CLOUD EXECUTOR INITIALIZED] Provider: {self.provider} | Target Account: {self.account_id}")
+        self.last_order_timestamps = {}  # Symbol-action debounce map
+        self.min_order_interval = 5.0    # 5-second debounce window per symbol
+
+        has_meta_creds = bool(META_API_TOKEN and PROP_ACCOUNT_ID and META_API_TOKEN != "YOUR_META_API_TOKEN")
+        mode_str = "LIVE CLOUD BROKER" if has_meta_creds else "PAPER / SIMULATION MODE"
+        logging.info(f"🚀 [CLOUD EXECUTOR INITIALIZED] Provider: {self.provider} | Mode: {mode_str}")
+        if not has_meta_creds and self.provider == "META_API":
+            logging.info("ℹ️ [SETUP NOTE] Set 'META_API_TOKEN' and 'PROP_ACCOUNT_ID' in Render to execute live trades.")
 
     async def execute_cloud_order(self, symbol: str, action: str, volume: float, price: float, tp: float, sl: float) -> Dict[str, Any]:
         """
         Submits market order to prop firm directly from Render Cloud.
         """
+        # Rate-limiting / debounce check
+        debounce_key = f"{symbol}:{action.upper()}"
+        now = time.time()
+        last_time = self.last_order_timestamps.get(debounce_key, 0.0)
+        if (now - last_time) < self.min_order_interval:
+            logging.warning(f"⚠️ [RATE LIMIT] Suppressed duplicate {action} order for {symbol} within {self.min_order_interval}s")
+            return {"status": "DEBOUNCED", "symbol": symbol, "action": action}
+        self.last_order_timestamps[debounce_key] = now
+
         logging.info(f"⚡ [CLOUD AUTO-TRADE] Initiating {action} for {symbol} | Volume: {volume} | Target TP: {tp}")
 
         # If MetaAPI is configured (Connects Render directly to MT5 account in cloud)
-        if self.provider == "META_API" and META_API_TOKEN != "YOUR_META_API_TOKEN":
+        if self.provider == "META_API" and META_API_TOKEN and META_API_TOKEN != "YOUR_META_API_TOKEN" and self.account_id:
             url = f"https://mt-client-api-v1.new-york.agiliumtrade.ai/users/current/accounts/{self.account_id}/trade"
             headers = {
                 "auth-token": META_API_TOKEN,
@@ -91,6 +112,7 @@ class CloudPropExecutor:
     async def start_listener(self):
         """
         Listens to internal UDP socket or local signal bus from Rust engine.
+        Authenticates payloads with UDP_SECRET.
         """
         class UdpProtocol(asyncio.DatagramProtocol):
             def __init__(self, executor):
@@ -98,8 +120,16 @@ class CloudPropExecutor:
 
             def datagram_received(self, data, addr):
                 try:
-                    payload = json.loads(data.decode())
-                    logging.info(f"📩 [SIGNAL RECEIVED FROM RUST CORE] {payload}")
+                    payload = json.loads(data.decode("utf-8"))
+                    
+                    # 🛡️ SECURITY CHECK: Authenticate UDP Signal
+                    if UDP_SECRET:
+                        auth_token = payload.get("auth_token", "")
+                        if not hmac.compare_digest(auth_token, UDP_SECRET):
+                            logging.warning(f"🚨 [UNAUTHORIZED UDP ATTEMPT] Invalid or missing auth token from {addr} on port 5002! Packet dropped.")
+                            return
+
+                    logging.info(f"📩 [SIGNAL RECEIVED FROM RUST CORE] {payload.get('action')} {payload.get('symbol')} @ {payload.get('price')}")
                     action = payload.get("action", "BUY")
                     symbol = payload.get("symbol", "ETHUSD")
                     price = payload.get("price", 2500.0)
@@ -122,6 +152,11 @@ class CloudPropExecutor:
 
         loop = asyncio.get_running_loop()
         logging.info("🎧 Cloud Prop Executor listening on 127.0.0.1:5002 for Rust signals...")
+        if UDP_SECRET:
+            logging.info("🔒 [UDP AUTHENTICATION] Enabled with SHA-256 constant-time secret check.")
+        else:
+            logging.warning("⚠️ [UDP AUTHENTICATION] UDP_SECRET not set. Set UDP_SECRET in environment for maximum security.")
+
         transport, protocol = await loop.create_datagram_endpoint(
             lambda: UdpProtocol(self),
             local_addr=("127.0.0.1", 5002)

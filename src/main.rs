@@ -51,14 +51,12 @@ fn save_state(eth: f64, usdt: f64, price: f64) {
     }
 }
 
-// 📱 TELEGRAM WEBHOOK — [SEC#1 FIX] Token from env, fallback to hardcoded
+// 📱 TELEGRAM WEBHOOK — Secure environment variable loading (No hardcoded fallback)
 async fn send_telegram_alert(message: String) {
-    let token = std::env::var("TELEGRAM_BOT_TOKEN")
-        .unwrap_or_else(|_| "8663900968:AAGzLRKBoe8Hb72GVQctI8z9KVwaWLQMoes".to_string());
-    let chat_id = std::env::var("TELEGRAM_CHAT_ID")
-        .unwrap_or_else(|_| "1432812458".to_string());
+    let token = std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default();
+    let chat_id = std::env::var("TELEGRAM_CHAT_ID").unwrap_or_default();
 
-    if token.is_empty() || token == "YOUR_TELEGRAM_BOT_TOKEN" {
+    if token.is_empty() || chat_id.is_empty() || token == "YOUR_TELEGRAM_BOT_TOKEN" {
         return;
     }
 
@@ -554,7 +552,8 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                                 save_state(eth_balance, usdt_balance, buy_price);
                                                 tokio::spawn(send_telegram_alert(msg.clone()));
 
-                                                // 📡 UDP Broadcast to Local Stealth Executor (mt5_stealth_trader.py)
+                                                // 📡 UDP Broadcast to Local / Cloud Stealth Executor
+                                                let udp_secret = std::env::var("UDP_SECRET").unwrap_or_default();
                                                 let buy_payload = serde_json::json!({
                                                     "action": "BUY",
                                                     "symbol": "ETHUSD",
@@ -562,7 +561,8 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                                     "tp_pct": tp,
                                                     "sl_pct": 0.003,
                                                     "amount_usd": trade_amount,
-                                                    "timestamp": chrono::Utc::now().to_rfc3339()
+                                                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                                                    "auth_token": udp_secret
                                                 });
                                                 if let Ok(sock) = tokio::net::UdpSocket::bind("0.0.0.0:0").await {
                                                     let _ = sock.send_to(buy_payload.to_string().as_bytes(), "127.0.0.1:5002").await;
@@ -655,14 +655,16 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                             save_state(eth_balance, usdt_balance, buy_price);
                                             tokio::spawn(send_telegram_alert(msg.clone()));
 
-                                            // 📡 UDP Broadcast to Local Stealth Executor (mt5_stealth_trader.py)
+                                            // 📡 UDP Broadcast to Local / Cloud Stealth Executor
+                                            let udp_secret = std::env::var("UDP_SECRET").unwrap_or_default();
                                             let sell_payload = serde_json::json!({
                                                 "action": "SELL",
                                                 "symbol": "ETHUSD",
                                                 "price": bid_price,
                                                 "profit_pct": profit_pct,
                                                 "reason": exit_reason,
-                                                "timestamp": chrono::Utc::now().to_rfc3339()
+                                                "timestamp": chrono::Utc::now().to_rfc3339(),
+                                                "auth_token": udp_secret
                                             });
                                             if let Ok(sock) = tokio::net::UdpSocket::bind("0.0.0.0:0").await {
                                                 let _ = sock.send_to(sell_payload.to_string().as_bytes(), "127.0.0.1:5002").await;

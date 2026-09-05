@@ -6,3 +6,4 @@ reqwest
 aiohttp
 fastapi
 uvicorn
+redis

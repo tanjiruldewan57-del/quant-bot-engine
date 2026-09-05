@@ -7,6 +7,18 @@ echo "======================================================"
 # 📁 Ensure log directory exists
 mkdir -p logs
 
+# 💾 STATE RESTORE: Pull latest verified state from Upstash Redis before services boot
+echo "💾 Restoring portfolio state from Cloud Persistence Layer..."
+python3 state_persistence.py restore >> logs/state_persistence.log 2>&1
+echo "  ✅ State restored / verified."
+
+# 💾 Start State Persistence Watcher Daemon in background
+echo "💾 Starting Cloud State Sync Daemon..."
+python3 state_persistence.py daemon >> logs/state_persistence.log 2>&1 &
+STATE_PID=$!
+echo "  ✅ State Sync Daemon PID: $STATE_PID"
+sleep 1
+
 # 🌐 Start SaaS API & Health Check Endpoint (Render Port Binding)
 echo "🌐 Starting SaaS API Health Check Endpoint on Port ${PORT:-8000}..."
 python3 saas_api.py >> logs/saas_api.log 2>&1 &

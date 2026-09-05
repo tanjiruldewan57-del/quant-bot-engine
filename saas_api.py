@@ -10,13 +10,20 @@ app = FastAPI(
     version="1.0.0"
 )
 
+import secrets
+import hmac
+
 # 🔴 SECURE CEO MASTER KEY (Environment Variable থেকে লোড হবে)
 # কোডে পাসওয়ার্ড লেখা নেই, তাই সোর্স কোড লিক হলেও হ্যাকার কিছুই করতে পারবে না।
-CEO_MASTER_KEY = os.getenv("CEO_MASTER_KEY", "fallback_key_if_not_set_in_koyeb")
+CEO_MASTER_KEY = os.getenv("CEO_MASTER_KEY")
+if not CEO_MASTER_KEY:
+    CEO_MASTER_KEY = secrets.token_urlsafe(32)
+    print("⚠️ [SECURITY WARNING] 'CEO_MASTER_KEY' environment variable not configured!")
+    print(f"🔑 [EPHEMERAL KEY GENERATED] Temporary CEO Key for this session: {CEO_MASTER_KEY}")
 
 # 🛡️ সিকিউরিটি মিডলওয়্যার: এই ফাংশনটি প্রত্যেকটি প্রাইভেট রিকোয়েস্ট চেক করবে
 def verify_ceo(x_ceo_key: str = Header(..., description="CEO Master Key for Authorization")):
-    if x_ceo_key != CEO_MASTER_KEY:
+    if not hmac.compare_digest(x_ceo_key, CEO_MASTER_KEY):
         raise HTTPException(status_code=403, detail="🚨 UNAUTHORIZED: Nice try, hacker.")
     return True
 
