@@ -39,6 +39,12 @@ echo "🐳 [4/4] Starting Whale Tracker..."
 python3 whale_tracker.py >> logs/whale_tracker.log 2>&1 &
 WHALE_PID=$!
 echo "  ✅ Whale Tracker PID: $WHALE_PID"
+sleep 1
+
+echo "☁️  [5/5] Starting 100% Automated Cloud Prop Executor..."
+python3 cloud_prop_executor.py >> logs/cloud_executor.log 2>&1 &
+EXECUTOR_PID=$!
+echo "  ✅ Cloud Executor PID: $EXECUTOR_PID"
 
 # Give all microservices 3 seconds to fully arm
 echo ""
