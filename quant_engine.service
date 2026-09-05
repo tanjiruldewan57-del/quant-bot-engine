@@ -1,0 +1,19 @@
+[Unit]
+Description=Quant Engine Black Box & Sentinel Daemon (Halal Spot HFT)
+After=network.target redis.target
+Wants=redis.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/quant_engine
+EnvironmentFile=/quant_engine/.env
+ExecStart=/bin/bash /quant_engine/start.sh
+Restart=always
+RestartSec=5s
+LimitNOFILE=65536
+KillMode=mixed
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=multi-user.target
