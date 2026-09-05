@@ -30,19 +30,25 @@ class MarketRegimeViterbiDecoder:
         ])
         self.pi = np.array(start_probs if start_probs is not None else [0.70, 0.30])
         
-    def _multivariate_gaussian_log_pdf(self, y, mean, covar):
-        """Calculates multivariate Gaussian log probability density to prevent numerical underflow."""
+    def _multivariate_gaussian_log_pdf(self, y, mean, covar, min_covar=1e-6):
+        """
+        Calculates multivariate Gaussian log probability density with diagonal 
+        covariance regularization to prevent singularity (det -> 0) and arithmetic underflow.
+        """
         d = len(y)
+        covar = np.array(covar, copy=True)
         covar_det = np.linalg.det(covar)
-        if covar_det <= 0:
-            covar += 1e-6 * np.eye(d)
+        
+        # REGULARIZATION: If the determinant collapses, apply covariance eigenvalue floor
+        if covar_det <= 1e-15:
+            covar += min_covar * np.eye(d)
             covar_det = np.linalg.det(covar)
             
         covar_inv = np.linalg.inv(covar)
         diff = y - mean
-        exponent = -0.5 * np.dot(diff.T, np.dot(covar_inv, diff))
-        normalization = -0.5 * (d * np.log(2 * np.pi) + np.log(covar_det))
-        return normalization + exponent
+        quadratic_form = -0.5 * np.dot(diff.T, np.dot(covar_inv, diff))
+        log_normalization = -0.5 * (d * np.log(2 * np.pi) + np.log(covar_det))
+        return log_normalization + quadratic_form
 
     def decode(self, observations):
         """
