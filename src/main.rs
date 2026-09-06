@@ -147,6 +147,61 @@ pub fn is_waterfall_crash(history: &[f64], _win_size: usize) -> bool {
     false
 }
 
+// 🛡️ MULTI-TIMEFRAME EMA TREND FILTER (FALLING KNIFE & CRASH SHIELD)
+#[derive(Clone, Debug)]
+pub struct EmaTrendFilter {
+    pub fast_ema: f64,
+    pub slow_ema: f64,
+    pub alpha_fast: f64,
+    pub alpha_slow: f64,
+    pub initialized: bool,
+}
+
+impl EmaTrendFilter {
+    pub fn new(fast_period: usize, slow_period: usize) -> Self {
+        Self {
+            fast_ema: 0.0,
+            slow_ema: 0.0,
+            alpha_fast: 2.0 / (fast_period as f64 + 1.0),
+            alpha_slow: 2.0 / (slow_period as f64 + 1.0),
+            initialized: false,
+        }
+    }
+
+    pub fn update(&mut self, price: f64) {
+        if !self.initialized {
+            self.fast_ema = price;
+            self.slow_ema = price;
+            self.initialized = true;
+        } else {
+            self.fast_ema = (price * self.alpha_fast) + (self.fast_ema * (1.0 - self.alpha_fast));
+            self.slow_ema = (price * self.alpha_slow) + (self.slow_ema * (1.0 - self.alpha_slow));
+        }
+    }
+
+    /// Checks if current price action allows safe entry without catching falling knives.
+    /// In an uptrend/range (fast_ema >= slow_ema), mean-reversion dips are immediately allowed.
+    /// In a downtrend (fast_ema < slow_ema), entries are blocked until price rebounds above fast_ema.
+    pub fn is_entry_allowed(&self, current_price: f64) -> (bool, &'static str) {
+        if !self.initialized {
+            return (true, "EMA Initializing");
+        }
+
+        // 1. Bullish or Range-Bound Market
+        if self.fast_ema >= self.slow_ema {
+            return (true, "Bullish/Neutral Trend (Regime Clear)");
+        }
+
+        // 2. Downtrend / Dump: Require price to curl back ABOVE fast EMA (Rebound Confirmation)
+        if current_price > self.fast_ema {
+            return (true, "Downtrend Rebound Confirmed (Curled Above Fast EMA)");
+        }
+
+        // 3. Falling knife: price is below fast EMA in an active downtrend
+        (false, "Bearish Dump in Progress (Falling Knife Shield Active)")
+    }
+}
+
 // 📡 MASTER SIGNAL AGGREGATOR
 pub async fn start_master_signal_aggregator(shared_params: Arc<RwLock<DynamicParams>>) {
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:5000")
@@ -390,6 +445,7 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
     );
 
     let mut price_history: Vec<f64> = Vec::with_capacity(25); // Pre-alloc for perf
+    let mut ema_filter = EmaTrendFilter::new(30, 150); // 🛡️ Multi-timeframe EMA Trend Filter (Fast 30 ticks, Slow 150 ticks)
     let mut is_trading = false;
     let mut reconnect_attempts: u32 = 0;
     let mut last_sell_time = std::time::Instant::now() - std::time::Duration::from_secs(120); // Cooldown tracker
@@ -446,6 +502,7 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                     let is_spread_safe = spread <= 1.50 && spread_bps <= 8.0;
 
                                     price_history.push(ask_price);
+                                    ema_filter.update(ask_price);
 
                                     let p = shared_params.read().await;
                                     let win_size = p.window_size;
@@ -510,7 +567,13 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                             warn!("🛑 [WATERFALL DEFENSE] Continuous markdown detected! Blocking falling-knife buy entry.");
                                         }
 
-                                        if (pure_dip || sentiment_dip) && !waterfall_in_progress {
+                                        // 🛡️ MULTI-TIMEFRAME EMA TREND SHIELD (FALLING KNIFE PREVENTION)
+                                        let (ema_allowed, ema_status_reason) = ema_filter.is_entry_allowed(ask_price);
+                                        if (pure_dip || sentiment_dip) && !waterfall_in_progress && !ema_allowed {
+                                            warn!("🛑 [EMA TREND SHIELD] {}! Blocking falling-knife entry at ${:.2}.", ema_status_reason, ask_price);
+                                        }
+
+                                        if (pure_dip || sentiment_dip) && !waterfall_in_progress && ema_allowed {
                                             is_trading = true;
                                             let gate = ComplianceGate::new();
                                             if gate.check_trade_validity("ETHUSDT", "BUY", false) {
@@ -551,6 +614,7 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                                     \n\
                                                     📊 Market Research & Triggers:\n\
                                                     • Strategy: {}\n\
+                                                    • EMA Trend Shield: {}\n\
                                                     • Z-Score: {:.2} (Mean-Reversion Dip)\n\
                                                     • Volatility: {:.4}\n\
                                                     • Compliance: 100% Spot Qabd Hukmi\n\
@@ -562,6 +626,7 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                                     ━━━━━━━━━━━━━━━━━━━━",
                                                     ask_price, tp * 100.0, target_tp, target_sl,
                                                     trade_amount, eth_balance, entry_reason,
+                                                    ema_status_reason,
                                                     z_score, std_dev, usdt_balance,
                                                     (usdt_balance - 97_000.0).max(0.0)
                                                 );
@@ -754,6 +819,7 @@ async fn main() {
                     ━━━━━━━━━━━━━━━━━━━━\n\
                     ✅ Master Core: Connected to Binance WSS (ETH/USDT)\n\
                     ✅ Dual-Core AI & NLP Aggregator: Armed (127.0.0.1:5000)\n\
+                    ✅ Multi-Timeframe EMA Trend Shield: Armed (Anti-Dump Protection)\n\
                     ✅ Halal Compliance Gate: Active (Spot Only | Zero Riba)\n\
                     ✅ Circuit Breaker: 3% Grossman-Zhou Floor ($97,000)\n\
                     📡 Status: Actively hunting institutional statistical dips...\n\
@@ -788,6 +854,7 @@ async fn main() {
                 • Z-Threshold: -{:.2}σ\n\
                 • Volatility Floor: ${:.2}\n\
                 • Target TP: +{:.2}%\n\
+                • EMA Trend Shield: Active (Anti-Dump Protection)\n\
                 • Max Daily Drawdown Floor: $97,000.00\n\
                 🔒 Shariah Compliance: 100% Spot Verified\n\
                 ━━━━━━━━━━━━━━━━━━━━",
@@ -885,5 +952,31 @@ mod tests {
             !is_waterfall_crash(&healthy_series, 20),
             "🚨 FAILED: Healthy fluctuating market was flagged as crash!"
         );
+    }
+
+    #[test]
+    fn test_ema_trend_filter_blocks_falling_knife() {
+        let mut filter = EmaTrendFilter::new(10, 30);
+        // Simulate falling market (2520 down to 2480)
+        for p in (2480..2520).rev() {
+            filter.update(p as f64);
+        }
+        // In strong downtrend and price below fast_ema:
+        let (allowed, reason) = filter.is_entry_allowed(2470.0);
+        assert_eq!(allowed, false, "Should block falling knife during dump!");
+        assert!(reason.contains("Falling Knife Shield"));
+    }
+
+    #[test]
+    fn test_ema_trend_filter_allows_rebound() {
+        let mut filter = EmaTrendFilter::new(10, 30);
+        for p in (2480..2520).rev() {
+            filter.update(p as f64);
+        }
+        // Now price bounces well above fast_ema
+        let bounce_price = filter.fast_ema + 2.0;
+        let (allowed, reason) = filter.is_entry_allowed(bounce_price);
+        assert_eq!(allowed, true, "Should allow entry when rebound is confirmed!");
+        assert!(reason.contains("Rebound Confirmed"));
     }
 }
