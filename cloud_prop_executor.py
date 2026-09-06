@@ -74,7 +74,7 @@ class CloudPropExecutor:
 
         # If MetaAPI is configured (Connects Render directly to MT5 account in cloud)
         if self.provider == "META_API" and META_API_TOKEN and META_API_TOKEN != "YOUR_META_API_TOKEN" and self.account_id:
-            url = f"https://mt-client-api-v1.new-york.agiliumtrade.ai/users/current/accounts/{self.account_id}/trade"
+            regions = ["new-york", "london", "singapore"]
             headers = {
                 "auth-token": META_API_TOKEN,
                 "Content-Type": "application/json"
@@ -87,24 +87,38 @@ class CloudPropExecutor:
                 "stopLoss": sl,
                 "comment": "QuantEngine-HalalSpot"
             }
-            try:
-                req = urllib.request.Request(url, data=json.dumps(order_data).encode("utf-8"), headers=headers)
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    res_body = response.read().decode("utf-8")
-                    logging.info(f"✅ [PROP FIRM FILLED] Broker Response: {res_body}")
-                    notify_telegram(f"✅ [CLOUD AUTO-TRADE SUCCESS]\n\nBroker: {self.provider}\nAction: {action} {symbol}\nVolume: {volume}\nPrice: ${price}\nStatus: FILLED 100% Hands-Free!")
-                    return json.loads(res_body)
-            except Exception as e:
-                logging.error(f"❌ Cloud Execution failed via MetaAPI: {e}")
-                notify_telegram(
-                    f"🚨 [BROKER EXECUTION ALERT]\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"❌ Broker execution failed for {action} {symbol}!\n"
-                    f"⚠️ Volume: {volume} Lots\n"
-                    f"🛑 Reason: {e}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━"
-                )
-                return {"status": "FAILED", "error": str(e)}
+            last_err = None
+            for region in regions:
+                url = f"https://mt-client-api-v1.{region}.agiliumtrade.ai/users/current/accounts/{self.account_id}/trade"
+                try:
+                    req = urllib.request.Request(url, data=json.dumps(order_data).encode("utf-8"), headers=headers)
+                    with urllib.request.urlopen(req, timeout=10) as response:
+                        res_body = response.read().decode("utf-8")
+                        logging.info(f"✅ [PROP FIRM FILLED via {region}] Broker Response: {res_body}")
+                        notify_telegram(f"✅ [CLOUD AUTO-TRADE SUCCESS]\n\nBroker: {self.provider} (FTMO)\nAction: {action} {symbol}\nVolume: {volume}\nPrice: ${price}\nStatus: FILLED 100% Hands-Free!")
+                        return json.loads(res_body)
+                except urllib.error.HTTPError as he:
+                    if he.code in (404, 502, 503):
+                        logging.warning(f"⚠️ Region {region} returned HTTP {he.code}, trying next region...")
+                        last_err = he
+                        continue
+                    else:
+                        last_err = he
+                        break
+                except Exception as e:
+                    last_err = e
+                    continue
+
+            logging.error(f"❌ Cloud Execution failed via MetaAPI: {last_err}")
+            notify_telegram(
+                f"🚨 [BROKER EXECUTION ALERT]\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"❌ Broker execution failed for {action} {symbol}!\n"
+                f"⚠️ Volume: {volume} Lots\n"
+                f"🛑 Reason: {last_err}\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
+            )
+            return {"status": "FAILED", "error": str(last_err)}
 
         # Simulation / Paper mode (Default before live credentials are bound)
         logging.info(f"📝 [SIMULATED CLOUD EXECUTION] {action} {symbol} simulated successfully. No manual intervention required.")
