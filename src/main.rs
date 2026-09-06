@@ -410,7 +410,14 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                 reconnect_attempts = 0; // Reset on success
                 let (_, mut read) = ws_stream.split();
 
-                while let Some(msg_result) = read.next().await {
+                while let Ok(msg_opt) = tokio::time::timeout(std::time::Duration::from_secs(15), read.next()).await {
+                    let msg_result = match msg_opt {
+                        Some(m) => m,
+                        None => {
+                            warn!("⚠️ [WSS STREAM CLOSED] Server closed stream. Reconnecting...");
+                            break;
+                        }
+                    };
                     if let Ok(msg) = msg_result {
                         if msg.is_ping() { continue; }
                         if let Ok(text) = msg.to_text() {
@@ -432,6 +439,11 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                         warn!("⚠️ [CROSSED MARKET] bid({}) > ask({}). Skipping.", bid_price, ask_price);
                                         continue;
                                     }
+
+                                    // 🛡️ INSTITUTIONAL SPREAD SHIELD: Reject wide spreads (e.g. rollover / midnight spikes > $1.50 or > 8 bps)
+                                    let spread = ask_price - bid_price;
+                                    let spread_bps = (spread / bid_price) * 10_000.0;
+                                    let is_spread_safe = spread <= 1.50 && spread_bps <= 8.0;
 
                                     price_history.push(ask_price);
 
@@ -484,8 +496,13 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                         // 2. Pure dip requires extreme statistical oversold (Z <= -z_thresh)
                                         // 3. Sentiment dip allows slight threshold boost while still requiring oversold dip (Never catch falling knives!)
                                         let has_healthy_volatility = std_dev >= std_thresh;
-                                        let pure_dip = z_score <= -z_thresh && has_healthy_volatility;
-                                        let sentiment_dip = nlp_score >= 0.5 && z_score <= -(z_thresh - 0.2).max(1.8) && has_healthy_volatility;
+                                        let pure_dip = z_score <= -z_thresh && has_healthy_volatility && is_spread_safe;
+                                        let sentiment_dip = nlp_score >= 0.5 && z_score <= -(z_thresh - 0.2).max(1.8) && has_healthy_volatility && is_spread_safe;
+
+                                        // 🛡️ SPREAD EXPANSION WARNING
+                                        if (z_score <= -z_thresh || (nlp_score >= 0.5 && z_score <= -(z_thresh - 0.2).max(1.8))) && !is_spread_safe {
+                                            warn!("🛑 [SPREAD SHIELD] Wide spread detected: ${:.2} ({:.1} bps). Blocking entry to avoid slippage.", spread, spread_bps);
+                                        }
 
                                         // 🌊 WATERFALL & DENOMINATOR EXPLOSION SHIELD
                                         let waterfall_in_progress = is_waterfall_crash(&price_history, win_size);
@@ -554,12 +571,16 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
 
                                                 // 📡 UDP Broadcast to Local / Cloud Stealth Executor
                                                 let udp_secret = std::env::var("UDP_SECRET").unwrap_or_default();
+                                                let calculated_lot = ((trade_amount / ask_price) * 100.0).round() / 100.0;
+                                                let calculated_lot = calculated_lot.clamp(0.01, 5.0);
+
                                                 let buy_payload = serde_json::json!({
                                                     "action": "BUY",
                                                     "symbol": "ETHUSD",
                                                     "price": ask_price,
                                                     "tp_pct": tp,
                                                     "sl_pct": 0.003,
+                                                    "volume": calculated_lot,
                                                     "amount_usd": trade_amount,
                                                     "timestamp": chrono::Utc::now().to_rfc3339(),
                                                     "auth_token": udp_secret
@@ -667,7 +688,11 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                                 "auth_token": udp_secret
                                             });
                                             if let Ok(sock) = tokio::net::UdpSocket::bind("0.0.0.0:0").await {
-                                                let _ = sock.send_to(sell_payload.to_string().as_bytes(), "127.0.0.1:5002").await;
+                                                // 🛡️ BURST-REDUNDANT TRANSMISSION: Send 3 bursts (50ms apart) to defeat UDP kernel drop
+                                                for _ in 0..3 {
+                                                    let _ = sock.send_to(sell_payload.to_string().as_bytes(), "127.0.0.1:5002").await;
+                                                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                                                }
                                             }
                                             buy_time = None;
 

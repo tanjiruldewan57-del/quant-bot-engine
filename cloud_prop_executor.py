@@ -96,6 +96,14 @@ class CloudPropExecutor:
                     return json.loads(res_body)
             except Exception as e:
                 logging.error(f"❌ Cloud Execution failed via MetaAPI: {e}")
+                notify_telegram(
+                    f"🚨 [BROKER EXECUTION ALERT]\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"❌ Broker execution failed for {action} {symbol}!\n"
+                    f"⚠️ Volume: {volume} Lots\n"
+                    f"🛑 Reason: {e}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━"
+                )
                 return {"status": "FAILED", "error": str(e)}
 
         # Simulation / Paper mode (Default before live credentials are bound)
@@ -136,13 +144,21 @@ class CloudPropExecutor:
                     tp_pct = payload.get("tp_pct", 0.0035)
                     sl_pct = payload.get("sl_pct", 0.0030)
                     
+                    # 🛡️ DYNAMIC POSITION SIZING: Extract lot from Rust core, clamped to institutional safe range
+                    raw_volume = payload.get("volume", 0.1)
+                    try:
+                        volume = round(float(raw_volume), 2)
+                        volume = max(0.01, min(volume, 5.0))
+                    except (ValueError, TypeError):
+                        volume = 0.1
+
                     tp = price * (1.0 + tp_pct)
                     sl = price * (1.0 - sl_pct)
                     
                     asyncio.create_task(self.executor.execute_cloud_order(
                         symbol=symbol,
                         action=action,
-                        volume=0.1,  # Calculated micro-lot
+                        volume=volume,
                         price=price,
                         tp=tp,
                         sl=sl
