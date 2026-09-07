@@ -2,10 +2,14 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{error, info, warn, Level};
+
+// 🛡️ REPLAY PROTECTION: Monotonically increasing sequence counter
+static SEQUENCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 // 💾 BOT STATE (For Memory Persistence)
 #[derive(Serialize, Deserialize, Debug)]
@@ -147,36 +151,54 @@ pub fn is_waterfall_crash(history: &[f64], _win_size: usize) -> bool {
     false
 }
 
-// 🛡️ MULTI-TIMEFRAME EMA TREND FILTER (FALLING KNIFE & CRASH SHIELD)
+// 🛡️ MULTI-TIMEFRAME CONTINUOUS-TIME DECAY EMA TREND FILTER (FALLING KNIFE & CRASH SHIELD)
 #[derive(Clone, Debug)]
 pub struct EmaTrendFilter {
     pub fast_ema: f64,
     pub slow_ema: f64,
-    pub alpha_fast: f64,
-    pub alpha_slow: f64,
+    pub tau_fast_secs: f64,
+    pub tau_slow_secs: f64,
+    pub last_update: Option<std::time::Instant>,
     pub initialized: bool,
 }
 
 impl EmaTrendFilter {
-    pub fn new(fast_period: usize, slow_period: usize) -> Self {
+    pub fn new(fast_secs: f64, slow_secs: f64) -> Self {
         Self {
             fast_ema: 0.0,
             slow_ema: 0.0,
-            alpha_fast: 2.0 / (fast_period as f64 + 1.0),
-            alpha_slow: 2.0 / (slow_period as f64 + 1.0),
+            tau_fast_secs: fast_secs.max(1.0),
+            tau_slow_secs: slow_secs.max(5.0),
+            last_update: None,
             initialized: false,
         }
     }
 
-    pub fn update(&mut self, price: f64) {
+    pub fn update_with_time(&mut self, price: f64, now: std::time::Instant) {
         if !self.initialized {
             self.fast_ema = price;
             self.slow_ema = price;
+            self.last_update = Some(now);
             self.initialized = true;
-        } else {
-            self.fast_ema = (price * self.alpha_fast) + (self.fast_ema * (1.0 - self.alpha_fast));
-            self.slow_ema = (price * self.alpha_slow) + (self.slow_ema * (1.0 - self.alpha_slow));
+            return;
         }
+
+        let dt = match self.last_update {
+            Some(prev) => now.duration_since(prev).as_secs_f64().max(0.001),
+            None => 0.1,
+        };
+        self.last_update = Some(now);
+
+        // Continuous-time exponential decay: alpha = 1.0 - exp(-dt / tau)
+        let alpha_fast = (1.0 - (-dt / self.tau_fast_secs).exp()).clamp(0.0001, 1.0);
+        let alpha_slow = (1.0 - (-dt / self.tau_slow_secs).exp()).clamp(0.0001, 1.0);
+
+        self.fast_ema = (price * alpha_fast) + (self.fast_ema * (1.0 - alpha_fast));
+        self.slow_ema = (price * alpha_slow) + (self.slow_ema * (1.0 - alpha_slow));
+    }
+
+    pub fn update(&mut self, price: f64) {
+        self.update_with_time(price, std::time::Instant::now());
     }
 
     /// Checks if current price action allows safe entry without catching falling knives.
@@ -184,7 +206,7 @@ impl EmaTrendFilter {
     /// In a downtrend (fast_ema < slow_ema), entries are blocked until price rebounds above fast_ema.
     pub fn is_entry_allowed(&self, current_price: f64) -> (bool, &'static str) {
         if !self.initialized {
-            return (true, "EMA Initializing");
+            return (true, "Continuous EMA Initializing");
         }
 
         // 1. Bullish or Range-Bound Market
@@ -194,7 +216,7 @@ impl EmaTrendFilter {
 
         // 2. Downtrend / Dump: Require price to curl back ABOVE fast EMA (Rebound Confirmation)
         if current_price > self.fast_ema {
-            return (true, "Downtrend Rebound Confirmed (Curled Above Fast EMA)");
+            return (true, "Downtrend Rebound Confirmed (Curled Above Fast Continuous EMA)");
         }
 
         // 3. Falling knife: price is below fast EMA in an active downtrend
@@ -575,7 +597,7 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
     );
 
     let mut price_history: Vec<f64> = Vec::with_capacity(25); // Pre-alloc for perf
-    let mut ema_filter = EmaTrendFilter::new(30, 150); // 🛡️ Multi-timeframe EMA Trend Filter (Fast 30 ticks, Slow 150 ticks)
+    let mut ema_filter = EmaTrendFilter::new(15.0, 75.0); // 🛡️ Continuous-Time Decay EMA (Tau Fast 15s, Slow 75s)
     let mut ofi_filter = OrderFlowImbalanceFilter::new(); // 🛡️ Order Flow Imbalance (OFI) Filter
     let mut vpin_filter = VpinToxicityFilter::new(50.0, 10); // 🛡️ Volume-Synchronized Probability of Toxicity (VPIN) Filter
     let mut prev_trade_price: f64 = 0.0;
@@ -796,8 +818,17 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                                 let calculated_lot = ((trade_amount / ask_price) * 100.0).round() / 100.0;
                                                 let calculated_lot = calculated_lot.clamp(0.01, 5.0);
 
+                                                // 🛡️ REPLAY PROTECTION & IDEMPOTENT ORDER INTENT
+                                                let seq = SEQUENCE_COUNTER.fetch_add(1, Ordering::SeqCst);
+                                                let now_ts = chrono::Utc::now();
+                                                let signal_id = format!("SIG-BUY-{}-{}", now_ts.timestamp_millis(), seq);
+                                                let order_intent_id = format!("INTENT-BUY-{}", seq);
+
                                                 let buy_payload = serde_json::json!({
                                                     "action": "BUY",
+                                                    "signal_id": signal_id,
+                                                    "sequence_number": seq,
+                                                    "order_intent_id": order_intent_id,
                                                     "symbol": "ETHUSDT",
                                                     "price": ask_price,
                                                     "tp_pct": tp,
@@ -806,7 +837,7 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                                     "amount_usd": trade_amount,
                                                     "ofi": ofi_filter.rolling_ofi,
                                                     "vpin": vpin_filter.current_vpin,
-                                                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                                                    "timestamp": now_ts.to_rfc3339(),
                                                     "auth_token": udp_secret
                                                 });
                                                 if let Ok(sock) = tokio::net::UdpSocket::bind("0.0.0.0:0").await {
@@ -904,13 +935,22 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
 
                                             // 📡 UDP Broadcast to Local / Cloud Stealth Executor
                                             let udp_secret = std::env::var("UDP_SECRET").unwrap_or_default();
+                                            // 🛡️ REPLAY PROTECTION & IDEMPOTENT ORDER INTENT
+                                            let seq = SEQUENCE_COUNTER.fetch_add(1, Ordering::SeqCst);
+                                            let now_ts = chrono::Utc::now();
+                                            let signal_id = format!("SIG-SELL-{}-{}", now_ts.timestamp_millis(), seq);
+                                            let order_intent_id = format!("INTENT-SELL-{}", seq);
+
                                             let sell_payload = serde_json::json!({
                                                 "action": "SELL",
+                                                "signal_id": signal_id,
+                                                "sequence_number": seq,
+                                                "order_intent_id": order_intent_id,
                                                 "symbol": "ETHUSDT",
                                                 "price": bid_price,
                                                 "profit_pct": profit_pct,
                                                 "reason": exit_reason,
-                                                "timestamp": chrono::Utc::now().to_rfc3339(),
+                                                "timestamp": now_ts.to_rfc3339(),
                                                 "auth_token": udp_secret
                                             });
                                             if let Ok(sock) = tokio::net::UdpSocket::bind("0.0.0.0:0").await {
@@ -1119,10 +1159,12 @@ mod tests {
 
     #[test]
     fn test_ema_trend_filter_blocks_falling_knife() {
-        let mut filter = EmaTrendFilter::new(10, 30);
-        // Simulate falling market (2520 down to 2480)
+        let mut filter = EmaTrendFilter::new(5.0, 25.0);
+        let mut t = std::time::Instant::now();
+        // Simulate falling market (2520 down to 2480 over 40 seconds)
         for p in (2480..2520).rev() {
-            filter.update(p as f64);
+            t += std::time::Duration::from_secs(1);
+            filter.update_with_time(p as f64, t);
         }
         // In strong downtrend and price below fast_ema:
         let (allowed, reason) = filter.is_entry_allowed(2470.0);
@@ -1132,9 +1174,11 @@ mod tests {
 
     #[test]
     fn test_ema_trend_filter_allows_rebound() {
-        let mut filter = EmaTrendFilter::new(10, 30);
+        let mut filter = EmaTrendFilter::new(5.0, 25.0);
+        let mut t = std::time::Instant::now();
         for p in (2480..2520).rev() {
-            filter.update(p as f64);
+            t += std::time::Duration::from_secs(1);
+            filter.update_with_time(p as f64, t);
         }
         // Now price bounces well above fast_ema
         let bounce_price = filter.fast_ema + 2.0;

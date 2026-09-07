@@ -69,6 +69,8 @@ class BinanceSpotExecutor:
         self.is_live = bool(self.api_key and self.api_secret and self.api_key != "YOUR_BINANCE_API_KEY")
         self.last_order_timestamps = {}
         self.debounce_seconds = 5.0
+        self.last_sequence_number = 0
+        self.processed_intents = set()
 
         mode_desc = "🔴 LIVE BINANCE SPOT (REAL ASSETS)" if self.is_live else "🟡 SIMULATION / DRY-RUN MODE"
         logging.info(f"🚀 [BINANCE SPOT EXECUTOR INITIALIZED] Mode: {mode_desc} | Gateway: {self.base_url}")
@@ -310,6 +312,24 @@ class BinanceSpotExecutor:
                         if not hmac.compare_digest(token, UDP_SECRET):
                             logging.warning(f"🚨 [UNAUTHORIZED UDP] Invalid token from {addr} on port {UDP_PORT}!")
                             return
+
+                    # 🛡️ REPLAY PROTECTION & MONOTONIC SEQUENCE AUDIT
+                    seq = int(payload.get("sequence_number", 0))
+                    if seq > 0:
+                        if seq <= self.executor.last_sequence_number:
+                            logging.warning(f"🚨 [REPLAY ATTACK BLOCKED] Stale sequence #{seq} <= #{self.executor.last_sequence_number}! Dropping packet.")
+                            return
+                        self.executor.last_sequence_number = seq
+
+                    # 🛡️ IDEMPOTENCY INTENT DEDUPLICATION
+                    intent_id = payload.get("order_intent_id", "")
+                    if intent_id:
+                        if intent_id in self.executor.processed_intents:
+                            logging.warning(f"⚠️ [IDEMPOTENCY DUPLICATE] OrderIntentID '{intent_id}' already processed! Dropping.")
+                            return
+                        self.executor.processed_intents.add(intent_id)
+                        if len(self.executor.processed_intents) > 2000:
+                            self.executor.processed_intents.clear()
 
                     action = payload.get("action", "").upper()
                     symbol = payload.get("symbol", "ETHUSDT")

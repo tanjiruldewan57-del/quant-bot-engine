@@ -51,6 +51,8 @@ class CloudPropExecutor:
         self.last_order_timestamps = {}  # Symbol-action debounce map
         self.min_order_interval = 8.0    # 8-second debounce window per symbol to prevent burst spam
         self.primary_region = os.getenv("META_API_REGION", "")
+        self.last_sequence_number = 0
+        self.processed_intents = set()
 
         has_meta_creds = bool(META_API_TOKEN and PROP_ACCOUNT_ID and META_API_TOKEN != "YOUR_META_API_TOKEN")
         mode_str = "LIVE CLOUD BROKER" if has_meta_creds else "PAPER / SIMULATION MODE"
@@ -223,6 +225,24 @@ class CloudPropExecutor:
                         if not hmac.compare_digest(auth_token, UDP_SECRET):
                             logging.warning(f"🚨 [UNAUTHORIZED UDP ATTEMPT] Invalid or missing auth token from {addr} on port 5002! Packet dropped.")
                             return
+
+                    # 🛡️ REPLAY PROTECTION & MONOTONIC SEQUENCE AUDIT
+                    seq = int(payload.get("sequence_number", 0))
+                    if seq > 0:
+                        if seq <= self.executor.last_sequence_number:
+                            logging.warning(f"🚨 [REPLAY ATTACK BLOCKED] Stale sequence #{seq} <= #{self.executor.last_sequence_number}! Dropping packet.")
+                            return
+                        self.executor.last_sequence_number = seq
+
+                    # 🛡️ IDEMPOTENCY INTENT DEDUPLICATION
+                    intent_id = payload.get("order_intent_id", "")
+                    if intent_id:
+                        if intent_id in self.executor.processed_intents:
+                            logging.warning(f"⚠️ [IDEMPOTENCY DUPLICATE] OrderIntentID '{intent_id}' already processed! Dropping.")
+                            return
+                        self.executor.processed_intents.add(intent_id)
+                        if len(self.executor.processed_intents) > 2000:
+                            self.executor.processed_intents.clear()
 
                     logging.info(f"📩 [SIGNAL RECEIVED FROM RUST CORE] {payload.get('action')} {payload.get('symbol')} @ {payload.get('price')}")
                     action = payload.get("action", "BUY")
