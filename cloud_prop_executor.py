@@ -49,71 +49,144 @@ class CloudPropExecutor:
         self.account_id = PROP_ACCOUNT_ID
         self.is_running = True
         self.last_order_timestamps = {}  # Symbol-action debounce map
-        self.min_order_interval = 5.0    # 5-second debounce window per symbol
+        self.min_order_interval = 8.0    # 8-second debounce window per symbol to prevent burst spam
+        self.primary_region = os.getenv("META_API_REGION", "")
 
         has_meta_creds = bool(META_API_TOKEN and PROP_ACCOUNT_ID and META_API_TOKEN != "YOUR_META_API_TOKEN")
         mode_str = "LIVE CLOUD BROKER" if has_meta_creds else "PAPER / SIMULATION MODE"
         logging.info(f"🚀 [CLOUD EXECUTOR INITIALIZED] Provider: {self.provider} | Mode: {mode_str}")
         if not has_meta_creds and self.provider == "META_API":
             logging.info("ℹ️ [SETUP NOTE] Set 'META_API_TOKEN' and 'PROP_ACCOUNT_ID' in Render to execute live trades.")
+        elif has_meta_creds and self.provider == "META_API":
+            self._ensure_account_provisioned()
+
+    def _ensure_account_provisioned(self):
+        """Discovers primary server region and ensures account is in DEPLOYED state."""
+        prov_url = f"https://mt-provisioning-api-v1.agiliumtrade.ai/users/current/accounts/{self.account_id}"
+        headers = {"auth-token": META_API_TOKEN, "Content-Type": "application/json"}
+        try:
+            req = urllib.request.Request(prov_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                discovered_region = data.get("region", "")
+                state = data.get("state", "")
+                if discovered_region:
+                    self.primary_region = discovered_region
+                    logging.info(f"📍 [META-API PROVISIONING] Account primary region detected: '{self.primary_region}' | State: {state}")
+                if state and state != "DEPLOYED":
+                    logging.warning(f"⚠️ Account state is '{state}'. Initiating deployment on MetaAPI...")
+                    deploy_url = f"https://mt-provisioning-api-v1.agiliumtrade.ai/users/current/accounts/{self.account_id}/deploy"
+                    deploy_req = urllib.request.Request(deploy_url, data=b"{}", headers=headers)
+                    with urllib.request.urlopen(deploy_req, timeout=10) as deploy_resp:
+                        logging.info(f"🚀 [META-API DEPLOYMENT TRIGGERED] Response: {deploy_resp.read().decode('utf-8')}")
+        except Exception as e:
+            logging.warning(f"⚠️ Could not auto-detect provisioning region: {e}. Falling back to default list.")
 
     async def execute_cloud_order(self, symbol: str, action: str, volume: float, price: float, tp: float, sl: float) -> Dict[str, Any]:
         """
-        Submits market order to prop firm directly from Render Cloud.
+        Submits market order to prop firm directly from Render Cloud with 429 backoff retry.
         """
+        # Normalize symbol: strip slashes/hyphens (e.g. 'ETH/USD' or 'ETH/USDT' -> 'ETHUSD')
+        clean_symbol = symbol.replace("/", "").replace("-", "").strip().upper()
+        if clean_symbol == "ETHUSDT":
+            clean_symbol = "ETHUSD"
+        elif clean_symbol == "BTCUSDT":
+            clean_symbol = "BTCUSD"
+
         # Rate-limiting / debounce check
-        debounce_key = f"{symbol}:{action.upper()}"
+        debounce_key = f"{clean_symbol}:{action.upper()}"
         now = time.time()
         last_time = self.last_order_timestamps.get(debounce_key, 0.0)
         if (now - last_time) < self.min_order_interval:
-            logging.warning(f"⚠️ [RATE LIMIT] Suppressed duplicate {action} order for {symbol} within {self.min_order_interval}s")
-            return {"status": "DEBOUNCED", "symbol": symbol, "action": action}
+            logging.warning(f"⚠️ [RATE LIMIT] Suppressed duplicate {action} order for {clean_symbol} within {self.min_order_interval}s")
+            return {"status": "DEBOUNCED", "symbol": clean_symbol, "action": action}
         self.last_order_timestamps[debounce_key] = now
 
-        logging.info(f"⚡ [CLOUD AUTO-TRADE] Initiating {action} for {symbol} | Volume: {volume} | Target TP: {tp}")
+        logging.info(f"⚡ [CLOUD AUTO-TRADE] Initiating {action} for {clean_symbol} | Volume: {volume} | Target TP: {tp}")
 
         # If MetaAPI is configured (Connects Render directly to MT5 account in cloud)
         if self.provider == "META_API" and META_API_TOKEN and META_API_TOKEN != "YOUR_META_API_TOKEN" and self.account_id:
-            regions = ["new-york", "london", "singapore"]
+            all_regions = ["new-york", "london", "singapore"]
+            regions = [self.primary_region] if self.primary_region in all_regions else []
+            for r in all_regions:
+                if r not in regions:
+                    regions.append(r)
+
             headers = {
                 "auth-token": META_API_TOKEN,
                 "Content-Type": "application/json"
             }
             order_data = {
                 "actionType": "ORDER_TYPE_BUY" if action.upper() == "BUY" else "ORDER_TYPE_SELL",
-                "symbol": symbol,
+                "symbol": clean_symbol,
                 "volume": volume,
                 "takeProfit": tp,
                 "stopLoss": sl,
                 "comment": "QuantEngine-HalalSpot"
             }
             last_err = None
+            max_retries = 3
+
             for region in regions:
                 url = f"https://mt-client-api-v1.{region}.agiliumtrade.ai/users/current/accounts/{self.account_id}/trade"
-                try:
-                    req = urllib.request.Request(url, data=json.dumps(order_data).encode("utf-8"), headers=headers)
-                    with urllib.request.urlopen(req, timeout=10) as response:
-                        res_body = response.read().decode("utf-8")
-                        logging.info(f"✅ [PROP FIRM FILLED via {region}] Broker Response: {res_body}")
-                        notify_telegram(f"✅ [CLOUD AUTO-TRADE SUCCESS]\n\nBroker: {self.provider} (FTMO)\nAction: {action} {symbol}\nVolume: {volume}\nPrice: ${price}\nStatus: FILLED 100% Hands-Free!")
-                        return json.loads(res_body)
-                except urllib.error.HTTPError as he:
-                    if he.code in (404, 502, 503):
-                        logging.warning(f"⚠️ Region {region} returned HTTP {he.code}, trying next region...")
-                        last_err = he
-                        continue
-                    else:
-                        last_err = he
+                
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        req = urllib.request.Request(url, data=json.dumps(order_data).encode("utf-8"), headers=headers)
+                        with urllib.request.urlopen(req, timeout=12) as response:
+                            res_body = response.read().decode("utf-8")
+                            logging.info(f"✅ [PROP FIRM FILLED via {region}] Broker Response: {res_body}")
+                            self.primary_region = region
+                            notify_telegram(
+                                f"✅ [CLOUD AUTO-TRADE SUCCESS]\n\n"
+                                f"Broker: {self.provider} (FTMO)\n"
+                                f"Action: {action} {clean_symbol}\n"
+                                f"Volume: {volume} Lots\n"
+                                f"Price: ${price:.2f}\n"
+                                f"Status: FILLED 100% Hands-Free!"
+                            )
+                            return json.loads(res_body)
+                    except urllib.error.HTTPError as he:
+                        err_content = ""
+                        try:
+                            err_content = he.read().decode("utf-8")
+                        except Exception:
+                            pass
+
+                        if he.code == 429:
+                            # 🛡️ EXPONENTIAL BACKOFF & RETRY FOR RATE LIMIT
+                            retry_after = 2.0 * attempt
+                            if he.headers and "Retry-After" in he.headers:
+                                try:
+                                    retry_after = float(he.headers["Retry-After"])
+                                except Exception:
+                                    pass
+                            logging.warning(f"⚠️ [RATE LIMIT 429] MetaAPI throttled request on {region} (attempt {attempt}/{max_retries}). Pausing {retry_after:.1f}s...")
+                            last_err = f"HTTP 429 Rate Limit (attempt {attempt}/{max_retries}): {err_content or he.reason}"
+                            if attempt < max_retries:
+                                await asyncio.sleep(retry_after)
+                                continue
+                            else:
+                                break
+                        elif he.code in (404, 502, 503):
+                            logging.warning(f"⚠️ Region {region} returned HTTP {he.code}, trying next region...")
+                            last_err = he
+                            break
+                        else:
+                            last_err = f"HTTP {he.code}: {err_content or he.reason}"
+                            break
+                    except Exception as e:
+                        last_err = e
                         break
-                except Exception as e:
-                    last_err = e
+
+                if self.primary_region == region and last_err and "429" not in str(last_err):
                     continue
 
             logging.error(f"❌ Cloud Execution failed via MetaAPI: {last_err}")
             notify_telegram(
                 f"🚨 [BROKER EXECUTION ALERT]\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"❌ Broker execution failed for {action} {symbol}!\n"
+                f"❌ Broker execution failed for {action} {clean_symbol}!\n"
                 f"⚠️ Volume: {volume} Lots\n"
                 f"🛑 Reason: {last_err}\n"
                 f"━━━━━━━━━━━━━━━━━━━━"
@@ -121,11 +194,11 @@ class CloudPropExecutor:
             return {"status": "FAILED", "error": str(last_err)}
 
         # Simulation / Paper mode (Default before live credentials are bound)
-        logging.info(f"📝 [SIMULATED CLOUD EXECUTION] {action} {symbol} simulated successfully. No manual intervention required.")
-        notify_telegram(f"🤖 [CLOUD BOT EXECUTED TRADE]\n\nAsset: {symbol}\nAction: {action}\nSimulated Lot: {volume}\nExecution: 100% Automated from Render Cloud!\nYour PC is OFF and safe.")
+        logging.info(f"📝 [SIMULATED CLOUD EXECUTION] {action} {clean_symbol} simulated successfully. No manual intervention required.")
+        notify_telegram(f"🤖 [CLOUD BOT EXECUTED TRADE]\n\nAsset: {clean_symbol}\nAction: {action}\nSimulated Lot: {volume}\nExecution: 100% Automated from Render Cloud!\nYour PC is OFF and safe.")
         return {
             "status": "SIMULATED_SUCCESS",
-            "symbol": symbol,
+            "symbol": clean_symbol,
             "action": action,
             "volume": volume,
             "timestamp": time.time()
