@@ -147,15 +147,16 @@
 
 | Milestone | Timeframe | Active Desks | Monthly Revenue | Cumulative Net Profit | Status |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| **Phase 0** | Week 1 | 0 | $0 | $0 | 🟢 **COMPLETED** |
-| **Phase 1** | Days 1–45 | 0 | $0 | $0 | 🟡 In Progress (TCA Engine) |
-| **Phase 2** | Days 30–60 | 0 | $0 | $0 | Pending Bank Pack |
-| **Phase 3** | Months 2–6 | 3 | $4,500 | **$50,000** | Pilot Customer Acquisition |
-| **Phase 4** | Months 7–14 | 15 | $52,500 | **$350,000** | Scaling Enterprise OEMS |
-| **Phase 5 (Base)** | Months 15–24 | 25 | $87,500 | **$600,000** | Realistic Base Target |
-| **Phase 5 (Upside)**| Months 15–24 | 30 | $105,000 | **$1,100,000+** | **1 MILLION DOLLAR PEAK** |
+| **Phase 0** | Week 1 | 0 | $0 | $0 | 🟢 **COMPLETED (Microstructure Core)** |
+| **Phase 1** | Days 1–45 | 0 | $0 | $0 | 🟢 **COMPLETED (TCA Engine & Alpha Proof)** |
+| **Phase 2** | Days 30–60 | 0 | $0 | $0 | 🟡 **ACTIVE (Safe Zero-Cost Treasury Setup)** |
+| **Phase 3** | Months 2–6 | 3 | $4,500 | **$50,000** | ⏳ Queued (First 3 Pilot Desks) |
+| **Phase 4** | Months 7–14 | 15 | $52,500 | **$350,000** | ⏳ Queued (Scaling to 15 Desks) |
+| **Phase 5 (Base)** | Months 15–24 | 25 | $87,500 | **$600,000** | ⏳ Queued (Realistic Base Target) |
+| **Phase 5 (Upside)**| Months 15–24 | 30 | $105,000 | **$1,100,000+** | 🎯 **1 MILLION DOLLAR GOAL** |
 
 ---
 
-## ⚡ NEXT ENGINEERING STEP:
-- Create `tca_engine.py` to start recording implementation shortfall, arrival prices, and markouts for the Execution Quality Whitepaper!
+## ⚡ CURRENT ACTIVE STEP:
+- **Phase 2 User Action:** Register free Individual Payoneer Freelance account (Refer to `PAYONEER_ACCOUNT_SETUP_GUIDE.md`) to be ready for incoming $1,500 retainer invoices.
+- **Phase 3 Outreach Initiation:** Run LinkedIn/Telegram outreach to the 20 target desks identified in `INSTITUTIONAL_OUTREACH_PLAYBOOK.md` offering the 14-day zero-risk TCA execution benchmark pilot.
