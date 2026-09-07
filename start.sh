@@ -53,10 +53,16 @@ WHALE_PID=$!
 echo "  ✅ Whale Tracker PID: $WHALE_PID"
 sleep 1
 
-echo "☁️  [5/5] Starting 100% Automated Cloud Prop Executor..."
+echo "☁️  [5/6] Starting 100% Automated Cloud Prop Executor..."
 python3 cloud_prop_executor.py >> logs/cloud_executor.log 2>&1 &
 EXECUTOR_PID=$!
 echo "  ✅ Cloud Executor PID: $EXECUTOR_PID"
+sleep 1
+
+echo "🏦 [6/6] Starting Binance Spot Trade-Only Executor (Shariah Mudarabah)..."
+python3 binance_spot_executor.py >> logs/binance_executor.log 2>&1 &
+BINANCE_PID=$!
+echo "  ✅ Binance Spot Executor PID: $BINANCE_PID"
 
 # Give all microservices 3 seconds to fully arm
 echo ""

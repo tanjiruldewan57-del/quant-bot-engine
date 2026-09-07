@@ -202,6 +202,136 @@ impl EmaTrendFilter {
     }
 }
 
+// 🛡️ MULTI-LEVEL ORDER FLOW IMBALANCE (OFI) FILTER (PASSIVE BID ABSORPTION)
+#[derive(Clone, Debug)]
+pub struct OrderFlowImbalanceFilter {
+    pub prev_bid_price: f64,
+    pub prev_bid_qty: f64,
+    pub prev_ask_price: f64,
+    pub prev_ask_qty: f64,
+    pub rolling_ofi: f64,
+    pub initialized: bool,
+}
+
+impl OrderFlowImbalanceFilter {
+    pub fn new() -> Self {
+        Self {
+            prev_bid_price: 0.0,
+            prev_bid_qty: 0.0,
+            prev_ask_price: 0.0,
+            prev_ask_qty: 0.0,
+            rolling_ofi: 0.0,
+            initialized: false,
+        }
+    }
+
+    /// Computes Cont-Kukanov-Stoikov Order Flow Imbalance across top-of-book depth updates
+    pub fn update(&mut self, bid_p: f64, bid_q: f64, ask_p: f64, ask_q: f64) -> f64 {
+        if !self.initialized {
+            self.prev_bid_price = bid_p;
+            self.prev_bid_qty = bid_q;
+            self.prev_ask_price = ask_p;
+            self.prev_ask_qty = ask_q;
+            self.initialized = true;
+            return 0.0;
+        }
+
+        let delta_bid = if bid_p > self.prev_bid_price {
+            bid_q
+        } else if (bid_p - self.prev_bid_price).abs() < 1e-6 {
+            bid_q - self.prev_bid_qty
+        } else {
+            -self.prev_bid_qty
+        };
+
+        let delta_ask = if ask_p < self.prev_ask_price {
+            ask_q
+        } else if (ask_p - self.prev_ask_price).abs() < 1e-6 {
+            ask_q - self.prev_ask_qty
+        } else {
+            -self.prev_ask_qty
+        };
+
+        let inst_ofi = delta_bid - delta_ask;
+        // Exponential smoothing (alpha = 0.20) to filter microsecond tick jitter
+        self.rolling_ofi = (inst_ofi * 0.20) + (self.rolling_ofi * 0.80);
+
+        self.prev_bid_price = bid_p;
+        self.prev_bid_qty = bid_q;
+        self.prev_ask_price = ask_p;
+        self.prev_ask_qty = ask_q;
+
+        self.rolling_ofi
+    }
+
+    pub fn is_order_flow_supportive(&self) -> bool {
+        // Positive OFI confirms passive buyers are replenishing depth and absorbing seller pressure
+        !self.initialized || self.rolling_ofi >= 0.0
+    }
+}
+
+// 🛡️ VOLUME-SYNCHRONIZED PROBABILITY OF TOXICITY (VPIN) FILTER
+#[derive(Clone, Debug)]
+pub struct VpinToxicityFilter {
+    pub bucket_volume_target: f64,
+    pub current_bucket_buy_vol: f64,
+    pub current_bucket_sell_vol: f64,
+    pub current_bucket_total_vol: f64,
+    pub completed_bucket_imbalances: Vec<f64>,
+    pub max_buckets: usize,
+    pub current_vpin: f64,
+}
+
+impl VpinToxicityFilter {
+    pub fn new(bucket_size: f64, num_buckets: usize) -> Self {
+        Self {
+            bucket_volume_target: bucket_size,
+            current_bucket_buy_vol: 0.0,
+            current_bucket_sell_vol: 0.0,
+            current_bucket_total_vol: 0.0,
+            completed_bucket_imbalances: Vec::with_capacity(num_buckets),
+            max_buckets: num_buckets,
+            current_vpin: 0.25, // Default baseline safe value
+        }
+    }
+
+    pub fn update(&mut self, price: f64, prev_price: f64, volume: f64) {
+        if volume <= 0.0 { return; }
+
+        // Bulk Volume Classification: Price tick progression
+        if price >= prev_price {
+            self.current_bucket_buy_vol += volume;
+        } else {
+            self.current_bucket_sell_vol += volume;
+        }
+        self.current_bucket_total_vol += volume;
+
+        // When current bucket capacity is filled
+        if self.current_bucket_total_vol >= self.bucket_volume_target {
+            let imbalance = (self.current_bucket_buy_vol - self.current_bucket_sell_vol).abs();
+            self.completed_bucket_imbalances.push(imbalance);
+            if self.completed_bucket_imbalances.len() > self.max_buckets {
+                self.completed_bucket_imbalances.remove(0);
+            }
+
+            let total_imbalance: f64 = self.completed_bucket_imbalances.iter().sum();
+            let total_capacity = self.completed_bucket_imbalances.len() as f64 * self.bucket_volume_target;
+            if total_capacity > 0.0 {
+                self.current_vpin = total_imbalance / total_capacity;
+            }
+
+            self.current_bucket_buy_vol = 0.0;
+            self.current_bucket_sell_vol = 0.0;
+            self.current_bucket_total_vol = 0.0;
+        }
+    }
+
+    pub fn is_toxic(&self) -> bool {
+        // VPIN > 0.65 indicates informed adverse institutional dump (Easily traps retail mean-reversion)
+        self.current_vpin > 0.65
+    }
+}
+
 // 📡 MASTER SIGNAL AGGREGATOR
 pub async fn start_master_signal_aggregator(shared_params: Arc<RwLock<DynamicParams>>) {
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:5000")
@@ -446,6 +576,9 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
 
     let mut price_history: Vec<f64> = Vec::with_capacity(25); // Pre-alloc for perf
     let mut ema_filter = EmaTrendFilter::new(30, 150); // 🛡️ Multi-timeframe EMA Trend Filter (Fast 30 ticks, Slow 150 ticks)
+    let mut ofi_filter = OrderFlowImbalanceFilter::new(); // 🛡️ Order Flow Imbalance (OFI) Filter
+    let mut vpin_filter = VpinToxicityFilter::new(50.0, 10); // 🛡️ Volume-Synchronized Probability of Toxicity (VPIN) Filter
+    let mut prev_trade_price: f64 = 0.0;
     let mut is_trading = false;
     let mut reconnect_attempts: u32 = 0;
     let mut last_sell_time = std::time::Instant::now() - std::time::Duration::from_secs(120); // Cooldown tracker
@@ -483,6 +616,8 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                 {
                                     let ask_price: f64 = ask_str.parse().unwrap_or(0.0);
                                     let bid_price: f64 = bid_str.parse().unwrap_or(0.0);
+                                    let ask_qty: f64 = parsed["A"].as_str().and_then(|s| s.parse().ok()).unwrap_or(5.0);
+                                    let bid_qty: f64 = parsed["B"].as_str().and_then(|s| s.parse().ok()).unwrap_or(5.0);
 
                                     // ⚡ EDGE CASE #2: Zero/Invalid Price Guard
                                     if ask_price < 100.0 || bid_price < 100.0 {
@@ -503,6 +638,13 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
 
                                     price_history.push(ask_price);
                                     ema_filter.update(ask_price);
+
+                                    // 🛡️ MICROSTRUCTURE INGESTION: Update Order Flow Imbalance & VPIN Toxicity
+                                    let rolling_ofi = ofi_filter.update(bid_price, bid_qty, ask_price, ask_qty);
+                                    let tick_volume = ask_qty + bid_qty;
+                                    let effective_prev = if prev_trade_price > 0.0 { prev_trade_price } else { ask_price };
+                                    vpin_filter.update(ask_price, effective_prev, tick_volume);
+                                    prev_trade_price = ask_price;
 
                                     let p = shared_params.read().await;
                                     let win_size = p.window_size;
@@ -573,7 +715,19 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                             warn!("🛑 [EMA TREND SHIELD] {}! Blocking falling-knife entry at ${:.2}.", ema_status_reason, ask_price);
                                         }
 
-                                        if (pure_dip || sentiment_dip) && !waterfall_in_progress && ema_allowed {
+                                        // 🛡️ VPIN TOXICITY SHIELD: Block entry if informed institutional liquidation toxicity > 0.65
+                                        let is_vpin_toxic = vpin_filter.is_toxic();
+                                        if (pure_dip || sentiment_dip) && !waterfall_in_progress && ema_allowed && is_vpin_toxic {
+                                            warn!("🛑 [VPIN TOXICITY SHIELD] High adverse toxicity ({:.2} > 0.65)! Informed institutional dumping detected. Blocking entry.", vpin_filter.current_vpin);
+                                        }
+
+                                        // 🛡️ OFI LIQUIDITY SHIELD: Block entry if rolling OFI is negative (bids fleeing depth)
+                                        let is_ofi_supportive = ofi_filter.is_order_flow_supportive();
+                                        if (pure_dip || sentiment_dip) && !waterfall_in_progress && ema_allowed && !is_vpin_toxic && !is_ofi_supportive {
+                                            warn!("🛑 [OFI LIQUIDITY SHIELD] Negative order flow imbalance ({:+.2} < 0.0)! Bids fleeing order book. Blocking entry.", ofi_filter.rolling_ofi);
+                                        }
+
+                                        if (pure_dip || sentiment_dip) && !waterfall_in_progress && ema_allowed && !is_vpin_toxic && is_ofi_supportive {
                                             is_trading = true;
                                             let gate = ComplianceGate::new();
                                             if gate.check_trade_validity("ETHUSDT", "BUY", false) {
@@ -615,6 +769,8 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                                     📊 Market Research & Triggers:\n\
                                                     • Strategy: {}\n\
                                                     • EMA Trend Shield: {}\n\
+                                                    • OFI Rolling Flow: {:+.2} (Passive Support)\n\
+                                                    • VPIN Toxicity: {:.2} (Safe < 0.65)\n\
                                                     • Z-Score: {:.2} (Mean-Reversion Dip)\n\
                                                     • Volatility: {:.4}\n\
                                                     • Compliance: 100% Spot Qabd Hukmi\n\
@@ -627,6 +783,7 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                                     ask_price, tp * 100.0, target_tp, target_sl,
                                                     trade_amount, eth_balance, entry_reason,
                                                     ema_status_reason,
+                                                    ofi_filter.rolling_ofi, vpin_filter.current_vpin,
                                                     z_score, std_dev, usdt_balance,
                                                     (usdt_balance - 97_000.0).max(0.0)
                                                 );
@@ -641,17 +798,21 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
 
                                                 let buy_payload = serde_json::json!({
                                                     "action": "BUY",
-                                                    "symbol": "ETHUSD",
+                                                    "symbol": "ETHUSDT",
                                                     "price": ask_price,
                                                     "tp_pct": tp,
                                                     "sl_pct": 0.003,
                                                     "volume": calculated_lot,
                                                     "amount_usd": trade_amount,
+                                                    "ofi": ofi_filter.rolling_ofi,
+                                                    "vpin": vpin_filter.current_vpin,
                                                     "timestamp": chrono::Utc::now().to_rfc3339(),
                                                     "auth_token": udp_secret
                                                 });
                                                 if let Ok(sock) = tokio::net::UdpSocket::bind("0.0.0.0:0").await {
-                                                    let _ = sock.send_to(buy_payload.to_string().as_bytes(), "127.0.0.1:5002").await;
+                                                    let payload_bytes = buy_payload.to_string();
+                                                    let _ = sock.send_to(payload_bytes.as_bytes(), "127.0.0.1:5002").await;
+                                                    let _ = sock.send_to(payload_bytes.as_bytes(), "127.0.0.1:5003").await;
                                                 }
 
                                                 let log = format!("BUY,{},{:.2},{:.4},{:.2}\n",
@@ -745,7 +906,7 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                             let udp_secret = std::env::var("UDP_SECRET").unwrap_or_default();
                                             let sell_payload = serde_json::json!({
                                                 "action": "SELL",
-                                                "symbol": "ETHUSD",
+                                                "symbol": "ETHUSDT",
                                                 "price": bid_price,
                                                 "profit_pct": profit_pct,
                                                 "reason": exit_reason,
@@ -754,8 +915,10 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                             });
                                             if let Ok(sock) = tokio::net::UdpSocket::bind("0.0.0.0:0").await {
                                                 // 🛡️ BURST-REDUNDANT TRANSMISSION: Send 3 bursts (50ms apart) to defeat UDP kernel drop
+                                                let payload_bytes = sell_payload.to_string();
                                                 for _ in 0..3 {
-                                                    let _ = sock.send_to(sell_payload.to_string().as_bytes(), "127.0.0.1:5002").await;
+                                                    let _ = sock.send_to(payload_bytes.as_bytes(), "127.0.0.1:5002").await;
+                                                    let _ = sock.send_to(payload_bytes.as_bytes(), "127.0.0.1:5003").await;
                                                     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                                                 }
                                             }
@@ -978,5 +1141,37 @@ mod tests {
         let (allowed, reason) = filter.is_entry_allowed(bounce_price);
         assert_eq!(allowed, true, "Should allow entry when rebound is confirmed!");
         assert!(reason.contains("Rebound Confirmed"));
+    }
+
+    #[test]
+    fn test_order_flow_imbalance_calculation() {
+        let mut ofi = OrderFlowImbalanceFilter::new();
+        // Initial tick
+        ofi.update(2500.0, 10.0, 2500.5, 10.0);
+        assert_eq!(ofi.is_order_flow_supportive(), true);
+
+        // Bid increases in price and size (aggressive buying / passive bid absorption)
+        let flow = ofi.update(2500.2, 15.0, 2500.7, 8.0);
+        assert!(flow > 0.0, "OFI should be positive when bids increase");
+        assert!(ofi.is_order_flow_supportive());
+
+        // Severe ask drop (aggressive selling pressure)
+        for _ in 0..5 {
+            ofi.update(2498.0, 2.0, 2498.5, 50.0);
+        }
+        assert_eq!(ofi.is_order_flow_supportive(), false, "Negative OFI should block entry");
+    }
+
+    #[test]
+    fn test_vpin_toxicity_filter() {
+        let mut vpin = VpinToxicityFilter::new(10.0, 5);
+        assert_eq!(vpin.is_toxic(), false);
+
+        // Severe one-sided selling volume (Institutional dumping)
+        for _ in 0..10 {
+            vpin.update(2490.0, 2500.0, 12.0); // Selling volume
+        }
+        assert!(vpin.current_vpin > 0.65, "Sustained one-sided dump should cause VPIN > 0.65");
+        assert_eq!(vpin.is_toxic(), true, "Toxic VPIN should trigger shield");
     }
 }
