@@ -86,6 +86,17 @@ class BinanceSpotExecutor:
         else:
             logging.info("ℹ️ [SETUP NOTE] Set 'BINANCE_API_KEY' and 'BINANCE_API_SECRET' in Render to execute live Spot orders.")
 
+        notify_telegram(
+            f"🚀 [CLOUD QUANT ENGINE ONLINE]\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"☁️ Server: Render Cloud (24/7 Active)\n"
+            f"📊 Venue: Binance Spot (1x Cash)\n"
+            f"🛡️ Security: Two-Plane Non-Custodial (`canWithdraw == False`)\n"
+            f"⚙️ Execution Mode: {mode_desc}\n"
+            f"🔋 PC Status: Your local PC can be safely turned OFF!\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+
     def _sign_query(self, params: Dict[str, Any]) -> str:
         """Appends timestamp and generates HMAC-SHA256 signature."""
         params["timestamp"] = int(time.time() * 1000)
@@ -384,6 +395,21 @@ class BinanceSpotExecutor:
             lambda: BinanceUdpProtocol(self),
             local_addr=("127.0.0.1", UDP_PORT)
         )
+
+        async def periodic_heartbeat():
+            while True:
+                await asyncio.sleep(7200) # Every 2 hours
+                notify_telegram(
+                    "💓 [CLOUD QUANT ENGINE HEARTBEAT]\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    "🌐 Status: 24/7 Online in Cloud (Render)\n"
+                    "💎 Pair: ETH/USDT (1x Cash Spot)\n"
+                    "🛡️ Security: Two-Plane Non-Custodial (`canWithdraw == False`)\n"
+                    "🔋 Local PC Status: Remains Safely OFF\n"
+                    "━━━━━━━━━━━━━━━━━━━━"
+                )
+
+        asyncio.create_task(periodic_heartbeat())
 
         while True:
             await asyncio.sleep(3600)

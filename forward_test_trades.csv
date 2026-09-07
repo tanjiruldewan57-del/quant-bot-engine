@@ -1,0 +1,2 @@
+timestamp,side,price,qty,capital_after,pnl_usd,pnl_pct,trigger_reason
+2026-09-07T09:39:16.100611+00:00,BUY,2491.16,4.0102,10000.00,0.0,0.0,FastEMA > SlowEMA & OFI=+0.06 (Binance-US)

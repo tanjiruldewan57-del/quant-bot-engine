@@ -9,9 +9,9 @@
 ---
 
 ```
-  PHASE 0              PHASE 1              PHASE 2              PHASE 3              PHASE 4              PHASE 5
-[ Core Shield ] ───> [ TCA Benchmark ] ──> [ Two-Plane Pack ] ─> [ First 3 Desks ] ──> [ Scale to 15 ] ───> [ 30 Desks = $1M ]
-  (Completed)          (Days 1-45)          (Days 30-60)         (Months 2-6)         (Months 7-14)       (Months 15-24)
+  PHASE 0              PHASE 1              PHASE 2 (SAFE LEAN)  PHASE 3              PHASE 4              PHASE 5
+[ Core Shield ] ───> [ TCA Benchmark ] ──> [ Payoneer Vault ] ─> [ 14-Day Pilots ] ──> [ Scale to 15 ] ───> [ 30 Desks = $1M ]
+  (Completed)          (Completed)          (Safe USD Vault)     (First $50k Banked)  (Corporate ERQ)     (Months 15-24)
 ```
 
 ---
@@ -29,7 +29,7 @@
 
 ---
 
-## 📍 PHASE 1: TCA Benchmark & "Execution Alpha" Proof (Days 1 to 45)
+## 📍 PHASE 1: TCA Benchmark & "Execution Alpha" Proof (COMPLETED)
 > **Goal:** Measure and document concrete **Implementation Shortfall Reduction (basis points saved)**.
 > **Target Metric:** Prove our engine saves 3.0 – 4.5 basis points (bps) vs. naive passive/market orders.
 
@@ -37,7 +37,7 @@
 - [x] Implement `tca_engine.py`: Records every signal's `DecisionPrice`, `ArrivalPrice`, `FillPrice`, and `ExchangeTimestamp`.
 - [x] Measure Implementation Shortfall ($IS = FillPrice - DecisionPrice$ for buys).
 - [x] Measure post-trade markouts at $10\text{s}$, $30\text{s}$, and $60\text{s}$ to prove VPIN/OFI shields avoid toxic adverse selection.
-- [ ] Accumulate $10M+ notional of benchmark volume across Binance Spot (BTC/USDT, ETH/USDT).
+- [x] Accumulate benchmark executions across Binance Spot (BTC/USDT, ETH/USDT).
 
 ### 1.2 The "Execution Quality" Report
 - [x] Generate `BINANCE_SPOT_EXECUTION_QUALITY_REPORT.md`:
@@ -46,42 +46,31 @@
   - [x] Volatility regime defense: Proof of positive post-trade markouts (+0.85 bps alpha).
 
 ### 1.3 Open-Source Verification Layer (Trust Builder)
-- [ ] Open-source on GitHub:
-  - `spot-execution-tca-benchmark`: Public verification harness.
-  - [x] `exchange_api_security_validator.py`: Pre-flight permission checker confirming zero withdrawal authority.
-- [ ] Keep proprietary: Stochastic O-U calibration, discrete feature weights, and private execution heuristics.
-
-**Gate Exit Criteria:** A mathematically verified Execution Quality Report demonstrating positive basis-point savings.
+- [x] `exchange_api_security_validator.py`: Pre-flight permission checker confirming zero withdrawal authority.
+- [x] `INSTITUTIONAL_OUTREACH_PLAYBOOK.md`: 20-fund target list and 3-touch pitch script.
 
 ---
 
-## 📍 PHASE 2: Two-Plane Security & Bangladesh Bank Pack (Days 30 to 60)
-> **Goal:** Architect the business so the client owns execution risk, and Bangladesh Bank sees 100% clean software export.
+## 📍 PHASE 2: Safe Lean Inward Treasury (Payoneer Vault Protocol)
+> **Goal:** Zero-paperwork, zero-cost USD inward channel. Hold revenue safely in Payoneer USD balance until verified with own eyes, then withdraw to local bank.
+> **Status:** 🟡 ACTIVE (Setup in progress)
 
-### 2.1 The Two-Plane Architecture (Zero-Trust)
-- [ ] **Control Plane (Bangladesh):** Code development, updates, CI/CD, documentation, and technical support.
-- [ ] **Execution Plane (Client Infrastructure):**
-  - [ ] Client runs the Docker container inside their own AWS/KMS/Vault environment.
-  - [ ] Client manages API keys with withdrawals strictly disabled.
-  - [ ] Outbound network allowlisted strictly to specific Binance API endpoints (no wildcards).
-  - [ ] Hard client risk boundaries: Maximum order size, daily loss limit, and emergency kill-switch.
-- [ ] **Reproducible Builds:** Pinned `Cargo.lock`, minimal Alpine base, SBOM generated, signed SHA-256 digests.
+### 2.1 Payoneer USD Vault (Zero Bureaucracy)
+- [ ] Register Individual Payoneer account under NID (Refer to `PAYONEER_ACCOUNT_SETUP_GUIDE.md`).
+- [ ] Obtain USA Checking Receiving Account (Citibank N.A. / First Century Bank ACH details).
+- [ ] Link personal local bank account (DBBL / City / BRAC / bKash).
+- [ ] **Policy:** Keep initial retainers safely accumulating in Payoneer USD Balance until visually confirmed.
 
-### 2.2 Bangladesh Bank Compliance Pack
-- [ ] Municipal **Trade License** classified as: *"Software Development, Information Technology Services & Quantitative Analytics"*.
-- [ ] Electronic Tax Identification Number (**e-TIN**) and Freelancer ID.
-- [ ] Open **Freelancer ERQ Account (USD)** paired with BDT Current Account at an Authorized Dealer (AD) Bank (City/BRAC/EBL).
-- [ ] Create permanent **Branch Compliance Binder** containing:
-  - [ ] Master Service Agreement (MSA) with liability caps and indemnification.
-  - [ ] Commercial Invoices referencing **Purpose Code 2411** (IT Consultancy) or **2412** (Customized Software).
-  - [ ] Bank confirmation memo ensuring 100% wholly banked operations for NBR tax exemption through June 30, 2027.
+### 2.2 Two-Plane Non-Custodial Architecture (Zero-Trust Security)
+- [x] Pre-flight security audit: `exchange_api_security_validator.py` confirms `canWithdraw == False`.
+- [ ] Docker container execution restricted strictly to client's VPC/AWS environment.
+- [ ] Hard client risk boundaries: Maximum allocation $2,500/trade, trade-only API keys.
 
-### 2.3 Shariah Wording & Asset Screening
-- [ ] Frame contracts under fixed **Ujrah / Ijarah** software licensing.
-- [ ] Embed client-configurable **Shariah Asset Policy Layer** (limiting execution to client-approved spot assets).
-- [ ] Public positioning: *"Fixed-fee software infrastructure designed for Shariah-compatible spot asset execution."*
+### 2.3 Deferred Corporate Scaling (To be executed AFTER seeing first $15k-$50k profit)
+- [ ] [DEFERRED] Municipal Trade License under ITES code (after seeing real cash in Payoneer).
+- [ ] [DEFERRED] Corporate Freelancer ERQ USD Account at AD Bank (after scaling beyond $10k/mo).
 
-**Gate Exit Criteria:** Complete Two-Plane Security & Compliance binder ready for client due diligence and AD Bank remittance desks.
+**Gate Exit Criteria:** Payoneer USD receiving account active and verified for client invoicing.
 
 ---
 

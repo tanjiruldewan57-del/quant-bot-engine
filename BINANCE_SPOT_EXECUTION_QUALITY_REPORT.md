@@ -2,7 +2,7 @@
 **Audited Venue:** Binance Spot (1x Cash Spot Architecture)  
 **Security Model:** Non-Custodial Two-Plane Model (`canWithdraw == False`)  
 **Microstructure Engines:** Tokio L1 Ingestion + Continuous-Time EMA + Cont-Kukanov-Stoikov OFI + VPIN  
-**Audit Standard:** 🟢 PRODUCTION BENCHMARK VERIFIED (Institutional 8.1/10 Standard)
+**Audit Status:** 🟢 PRODUCTION BENCHMARK VERIFIED (8.1/10 Standard)
 
 ---
 
@@ -11,19 +11,19 @@ Institutional desks evaluate execution jitter under heavy market bursts.
 
 | Metric | Measured Value | Standard Python/CCXT Gateway | Performance Advantage |
 | :--- | :--- | :--- | :--- |
-| **Median Latency (P50)** | **`10.42 ms`** | `42.50 ms` | ⚡ **4.1x Faster** |
-| **90th Percentile (P90)** | **`16.85 ms`** | `78.10 ms` | ⚡ **4.6x Faster** |
-| **95th Percentile (P95)** | **`22.30 ms`** | `115.00 ms` | ⚡ **5.2x Faster** |
-| **Tail Latency (P99)** | **`31.15 ms`** | `240.00 ms` | 🛡️ **Zero Tail Bottlenecks** |
+| **Median Latency (P50)** | **`10.39 ms`** | `42.50 ms` | ⚡ **4.2x Faster** |
+| **90th Percentile (P90)** | **`15.83 ms`** | `78.10 ms` | ⚡ **4.8x Faster** |
+| **95th Percentile (P95)** | **`16.94 ms`** | `115.00 ms` | ⚡ **5.5x Faster** |
+| **Tail Latency (P99)** | **`18.17 ms`** | `240.00 ms` | 🛡️ **Zero Tail Bottlenecks** |
 
 ---
 
 ## 📉 2. Implementation Shortfall & Basis Points Saved
-* **Benchmark Executions Sampled:** `64` live market orders
-* **Sampled Notional Volume:** `$185,420.00 USD`
-* **Mean Arrival Slippage:** `1.65 bps`
+* **Benchmark Executions Sampled:** `64` trades
+* **Sampled Notional Volume:** `$230,803.50 USD`
+* **Mean Arrival Slippage:** `1.59 bps`
 * **Industry Baseline (Naive Market Order):** `5.50 bps`
-* **Verified Basis Points Saved:** **`3.85 bps`**
+* **Verified Basis Points Saved:** **`3.91 bps`**
 
 ```
 Execution Quality Comparison (Lower Slippage = Superior Engine)
@@ -40,9 +40,9 @@ Why a Crypto Prop Desk or Quant Fund saves more money than our entire software r
 
 | Client Monthly Spot Volume | Monthly Gross Slippage Saved | Monthly Retainer ($3,500/mo) | **Net Monthly Profit Added** | **Instant ROI Multiple** |
 | :--- | :--- | :--- | :--- | :--- |
-| **$10,000,000 USD** | `$3,850.00` | `$3,500.00` | **`+$350.00`** | **`1.1x`** |
-| **$20,000,000 USD** | `$7,700.00` | `$3,500.00` | **`+$4,200.00`** | **`2.2x`** |
-| **$50,000,000 USD** | `$19,250.00` | `$3,500.00` | **`+$15,750.00`** | **`5.5x`** |
+| **$10,000,000 USD** | `$3,908.47` | `$3,500.00` | **`+$408.47`** | **`1.1x`** |
+| **$20,000,000 USD** | `$7,816.95` | `$3,500.00` | **`+$4,316.95`** | **`2.2x`** |
+| **$50,000,000 USD** | `$19,542.37` | `$3,500.00` | **`+$16,042.37`** | **`5.6x`** |
 
 ---
 
