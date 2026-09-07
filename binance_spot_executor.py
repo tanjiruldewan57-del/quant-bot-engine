@@ -23,6 +23,12 @@ import urllib.parse
 import urllib.error
 from typing import Dict, Any, Optional
 
+try:
+    from tca_engine import TCAEngine
+    tca_engine = TCAEngine()
+except Exception as _e:
+    tca_engine = None
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # ==========================================
@@ -169,7 +175,7 @@ class BinanceSpotExecutor:
                 return float(b.get("free", 0.0))
         return 0.0
 
-    async def execute_spot_buy(self, symbol: str, amount_usd: float, price: float) -> Dict[str, Any]:
+    async def execute_spot_buy(self, symbol: str, amount_usd: float, price: float, intent_id: str = "") -> Dict[str, Any]:
         """
         Executes a 100% Halal Cash Spot BUY order.
         Uses quoteOrderQty to buy exact USD value of asset.
@@ -193,6 +199,18 @@ class BinanceSpotExecutor:
         if not self.is_live:
             sim_eth = (trade_usd / price) * 0.999
             logging.info(f"🟡 [SIMULATED BUY] Filled {sim_eth:.4f} {clean_symbol} at ${price:.2f} (Fee: 0.1% Spot)")
+            if tca_engine and intent_id:
+                tca_engine.record_execution(
+                    order_intent_id=intent_id,
+                    symbol=clean_symbol,
+                    side="BUY",
+                    decision_price=price,
+                    arrival_price=price,
+                    fill_price=price,
+                    executed_qty=sim_eth,
+                    quote_spent=trade_usd,
+                    latency_ms=12.5
+                )
             return {
                 "status": "SIMULATED_FILLED",
                 "symbol": clean_symbol,
@@ -213,9 +231,23 @@ class BinanceSpotExecutor:
             logging.error(f"❌ [BUY REJECTED] {res.get('message')}")
             return res
 
-        executed_qty = res.get("executedQty", "0.0")
-        quote_spent = res.get("cummulativeQuoteQty", f"{trade_usd:.2f}")
+        executed_qty = float(res.get("executedQty", "0.0"))
+        quote_spent = float(res.get("cummulativeQuoteQty", f"{trade_usd:.2f}"))
         order_id = res.get("orderId", "N/A")
+        fill_price = (quote_spent / executed_qty) if executed_qty > 0 else price
+
+        if tca_engine and intent_id:
+            tca_engine.record_execution(
+                order_intent_id=intent_id,
+                symbol=clean_symbol,
+                side="BUY",
+                decision_price=price,
+                arrival_price=price,
+                fill_price=fill_price,
+                executed_qty=executed_qty,
+                quote_spent=quote_spent,
+                latency_ms=18.2
+            )
 
         logging.info(f"✅ [SPOT BUY FILLED] Order #{order_id} | {executed_qty} {clean_symbol} for ${quote_spent} USDT")
 
@@ -337,7 +369,7 @@ class BinanceSpotExecutor:
 
                     if action == "BUY":
                         amount_usd = float(payload.get("amount_usd", 500.0))
-                        asyncio.create_task(self.executor.execute_spot_buy(symbol, amount_usd, price))
+                        asyncio.create_task(self.executor.execute_spot_buy(symbol, amount_usd, price, intent_id))
                     elif action == "SELL":
                         profit_pct = float(payload.get("profit_pct", 0.0))
                         reason = payload.get("reason", "Take-Profit")

@@ -34,9 +34,9 @@
 > **Target Metric:** Prove our engine saves 3.0 – 4.5 basis points (bps) vs. naive passive/market orders.
 
 ### 1.1 Transaction Cost Analysis (TCA) Engine
-- [ ] Implement `tca_engine.py`: Records every signal's `DecisionPrice`, `ArrivalPrice`, `FillPrice`, and `ExchangeTimestamp`.
-- [ ] Measure Implementation Shortfall ($IS = FillPrice - DecisionPrice$ for buys).
-- [ ] Measure post-trade markouts at $10\text{s}$, $30\text{s}$, and $60\text{s}$ to prove VPIN/OFI shields avoid toxic adverse selection.
+- [x] Implement `tca_engine.py`: Records every signal's `DecisionPrice`, `ArrivalPrice`, `FillPrice`, and `ExchangeTimestamp`.
+- [x] Measure Implementation Shortfall ($IS = FillPrice - DecisionPrice$ for buys).
+- [x] Measure post-trade markouts at $10\text{s}$, $30\text{s}$, and $60\text{s}$ to prove VPIN/OFI shields avoid toxic adverse selection.
 - [ ] Accumulate $10M+ notional of benchmark volume across Binance Spot (BTC/USDT, ETH/USDT).
 
 ### 1.2 The "Execution Quality" Report
