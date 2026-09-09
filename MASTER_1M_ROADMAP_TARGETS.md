@@ -22,8 +22,12 @@
 
 - [x] **Sub-10ms Async L1 Ingestion:** Tokio-Tungstenite WSS connected directly to Binance `bookTicker`.
 - [x] **Continuous-Time Decay EMA:** Refactored from tick-clock to true physical time ($\tau_{\text{fast}} = 15.0\text{s}$, $\tau_{\text{slow}} = 75.0\text{s}$).
+- [x] **Extended Kalman Filter (EKF):** Zero-lag state-space drift & velocity estimation replacing lagging averages.
+- [x] **Bivariate Hawkes Point Process:** Bacry & Muzy (2014) self-exciting cascade shield blocking entry when $\lambda_{\text{sell}} / \lambda_{\text{buy}} > 3.0$.
+- [x] **Cross-Venue Lead-Lag Micro-Sensor:** Coinbase Institutional vs Binance Spot real-time information asymmetry detector.
 - [x] **Order Flow Imbalance (OFI):** Cont-Kukanov-Stoikov depth filter blocking buys when $\text{OFI} < 0.0$.
 - [x] **VPIN Toxicity Defense:** Bulk Volume Classification ($50\text{ unit buckets}$) blocking entries when $\text{VPIN} > 0.65$.
+- [x] **Avellaneda-Stoikov Post-Only Engine:** Guaranteed Maker (GTX) limit execution securing +0.02% fee rebates.
 - [x] **Replay Attack & Duplicate Protection:** Monotonic atomic `SEQUENCE_COUNTER` and unique `OrderIntentID` active.
 - [x] **Trade-Only Execution Engine:** `binance_spot_executor.py` verifying `canWithdraw == False` on boot.
 

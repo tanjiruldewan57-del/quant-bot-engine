@@ -224,6 +224,93 @@ impl EmaTrendFilter {
     }
 }
 
+// 🧠 EXTENDED KALMAN FILTER (EKF) FOR ZERO-LAG MICROSTRUCTURE DRIFT ESTIMATION
+// Meucci (2005) / Chui & Chen (2017) State-Space Filtering
+#[derive(Clone, Debug)]
+pub struct ExtendedKalmanFilter {
+    pub price_est: f64,       // x[0]: true underlying asset price estimate
+    pub velocity_est: f64,    // x[1]: instantaneous price drift rate ($/sec)
+    pub p00: f64,             // Error covariance matrix P: [ [p00, p01], [p10, p11] ]
+    pub p01: f64,
+    pub p10: f64,
+    pub p11: f64,
+    pub q_var: f64,           // Process noise variance (drift unpredictability)
+    pub r_base_var: f64,      // Baseline measurement noise (bid-ask bounce)
+    pub last_update: Option<std::time::Instant>,
+    pub initialized: bool,
+}
+
+impl ExtendedKalmanFilter {
+    pub fn new(q_var: f64, r_base_var: f64) -> Self {
+        Self {
+            price_est: 0.0,
+            velocity_est: 0.0,
+            p00: 1.0,
+            p01: 0.0,
+            p10: 0.0,
+            p11: 1.0,
+            q_var,
+            r_base_var,
+            last_update: None,
+            initialized: false,
+        }
+    }
+
+    pub fn update(&mut self, mid_price: f64, spread: f64) -> (f64, f64) {
+        let now = std::time::Instant::now();
+        if !self.initialized {
+            self.price_est = mid_price;
+            self.velocity_est = 0.0;
+            self.last_update = Some(now);
+            self.initialized = true;
+            return (self.price_est, self.velocity_est);
+        }
+
+        let dt = match self.last_update {
+            Some(t) => now.duration_since(t).as_secs_f64().clamp(0.001, 2.0),
+            None => 0.01,
+        };
+        self.last_update = Some(now);
+
+        // 1. Predict Step
+        // State transition: x_pred = F * x = [price + dt * velocity, velocity]
+        let x_pred_price = self.price_est + dt * self.velocity_est;
+        let x_pred_vel = self.velocity_est;
+
+        // Covariance predict: P_pred = F * P * F^T + Q
+        let p00_pred = self.p00 + dt * (self.p10 + self.p01) + dt * dt * self.p11 + self.q_var * dt;
+        let p01_pred = self.p01 + dt * self.p11;
+        let p10_pred = self.p10 + dt * self.p11;
+        let p11_pred = self.p11 + self.q_var * dt;
+
+        // 2. Dynamic Measurement Noise scaling based on current bid-ask spread
+        let r_dynamic = self.r_base_var + (spread * spread * 0.5);
+
+        // 3. Update Step
+        let y = mid_price - x_pred_price;
+        let s = p00_pred + r_dynamic;
+        let k0 = p00_pred / s;
+        let k1 = p10_pred / s;
+
+        // Updated state
+        self.price_est = x_pred_price + k0 * y;
+        self.velocity_est = x_pred_vel + k1 * y;
+
+        // Updated covariance: P = (I - K * H) * P_pred
+        self.p00 = (1.0 - k0) * p00_pred;
+        self.p01 = (1.0 - k0) * p01_pred;
+        self.p10 = p10_pred - k1 * p00_pred;
+        self.p11 = p11_pred - k1 * p01_pred;
+
+        (self.price_est, self.velocity_est)
+    }
+
+    /// True State Trend Confirmation: returns whether underlying price drift is non-collapsing
+    pub fn is_momentum_favorable(&self) -> bool {
+        !self.initialized || self.velocity_est >= -0.05
+    }
+}
+
 // 🛡️ MULTI-LEVEL ORDER FLOW IMBALANCE (OFI) FILTER (PASSIVE BID ABSORPTION)
 #[derive(Clone, Debug)]
 pub struct OrderFlowImbalanceFilter {
@@ -351,6 +438,174 @@ impl VpinToxicityFilter {
     pub fn is_toxic(&self) -> bool {
         // VPIN > 0.65 indicates informed adverse institutional dump (Easily traps retail mean-reversion)
         self.current_vpin > 0.65
+    }
+}
+
+// 🌊 BIVARIATE HAWKES SELF-EXCITING POINT PROCESS (BACRY & MUZY 2014)
+// Quantitative Finance (2014) / Rambaldi et al. (2016)
+// Models order clustering cascades. Prevents entry when sell arrival bursts are accelerating.
+#[derive(Clone, Debug)]
+pub struct HawkesPointProcessFilter {
+    pub mu_buy: f64,           // Baseline buy event arrival intensity
+    pub mu_sell: f64,          // Baseline sell event arrival intensity
+    pub alpha: f64,            // Self-excitation / contagion coefficient (typically 0.6 - 0.9)
+    pub beta: f64,             // Exponential memory decay speed (per second, typically 1.5 - 3.0)
+    pub lambda_buy: f64,       // Current conditional intensity for buys
+    pub lambda_sell: f64,      // Current conditional intensity for sells
+    pub last_event_time: Option<std::time::Instant>,
+    pub cascade_blocks_count: u64,
+    pub initialized: bool,
+}
+
+impl HawkesPointProcessFilter {
+    pub fn new(alpha: f64, beta: f64) -> Self {
+        Self {
+            mu_buy: 1.0,
+            mu_sell: 1.0,
+            alpha,
+            beta,
+            lambda_buy: 1.0,
+            lambda_sell: 1.0,
+            last_event_time: None,
+            cascade_blocks_count: 0,
+            initialized: false,
+        }
+    }
+
+    pub fn update(&mut self, is_sell_trade: bool, volume: f64) {
+        let now = std::time::Instant::now();
+        if !self.initialized {
+            self.last_event_time = Some(now);
+            self.initialized = true;
+            return;
+        }
+
+        let dt = match self.last_event_time {
+            Some(t) => now.duration_since(t).as_secs_f64().clamp(0.0001, 5.0),
+            None => 0.01,
+        };
+        self.last_event_time = Some(now);
+
+        // Exponential decay of past intensity: lambda(t) = mu + (lambda(prev) - mu) * exp(-beta * dt)
+        let decay = (-self.beta * dt).exp();
+        self.lambda_buy = self.mu_buy + (self.lambda_buy - self.mu_buy) * decay;
+        self.lambda_sell = self.mu_sell + (self.lambda_sell - self.mu_sell) * decay;
+
+        // Self-exciting pulse upon new event:
+        let impact = self.alpha * (1.0 + (volume / 2.0).ln().max(0.0));
+        if is_sell_trade {
+            self.lambda_sell += impact;
+        } else {
+            self.lambda_buy += impact;
+        }
+    }
+
+    /// Ratio of sell intensity to buy intensity: R_Hawkes = lambda_sell / lambda_buy
+    /// If R > 3.0, sellers are clustering in an endogenous cascade -> DO NOT BUY!
+    pub fn is_toxic_cascade(&mut self) -> (bool, f64) {
+        if !self.initialized {
+            return (false, 1.0);
+        }
+        let ratio = self.lambda_sell / self.lambda_buy.max(0.001);
+        let is_cascade = ratio > 3.0;
+        if is_cascade {
+            self.cascade_blocks_count += 1;
+        }
+        (is_cascade, ratio)
+    }
+}
+
+// ⚡ CROSS-VENUE LEAD-LAG SENSOR (COINBASE INSTITUTIONAL VS BINANCE GLOBAL SPOT)
+// Schoar & Makarov (2020) JFE / Hautsch et al. (2024)
+// Listens to Coinbase Spot WebSocket wss://ws-feed.exchange.coinbase.com
+#[derive(Clone, Debug)]
+pub struct CrossVenueLeadLagSensor {
+    pub latest_coinbase_price: Arc<RwLock<f64>>,
+    pub latest_coinbase_time: Arc<RwLock<Option<std::time::Instant>>>,
+}
+
+impl CrossVenueLeadLagSensor {
+    pub fn new() -> Self {
+        Self {
+            latest_coinbase_price: Arc::new(RwLock::new(0.0)),
+            latest_coinbase_time: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub fn start_listener(&self) {
+        let cb_price = self.latest_coinbase_price.clone();
+        let cb_time = self.latest_coinbase_time.clone();
+
+        tokio::spawn(async move {
+            let coinbase_url = "wss://ws-feed.exchange.coinbase.com";
+            loop {
+                match connect_async(coinbase_url).await {
+                    Ok((ws_stream, _)) => {
+                        info!("🌐 [CROSS-VENUE] Connected to Coinbase Institutional Feed (ETH-USD)");
+                        let (mut write, mut read) = ws_stream.split();
+
+                        // Subscribe to ETH-USD ticker
+                        let sub_msg = serde_json::json!({
+                            "type": "subscribe",
+                            "product_ids": ["ETH-USD"],
+                            "channels": ["ticker"]
+                        });
+
+                        if let Ok(sub_text) = serde_json::to_string(&sub_msg) {
+                            let _ = write.send(tokio_tungstenite::tungstenite::Message::Text(sub_text)).await;
+                        }
+
+                        while let Some(msg_result) = read.next().await {
+                            if let Ok(msg) = msg_result {
+                                if let Ok(text) = msg.to_text() {
+                                    if let Ok(val) = serde_json::from_str::<Value>(text) {
+                                        if let Some(price_str) = val["price"].as_str() {
+                                            if let Ok(p) = price_str.parse::<f64>() {
+                                                if p > 100.0 {
+                                                    let mut cp = cb_price.write().await;
+                                                    *cp = p;
+                                                    let mut ct = cb_time.write().await;
+                                                    *ct = Some(std::time::Instant::now());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        warn!("⚠️ [CROSS-VENUE] Coinbase stream closed. Reconnecting in 3s...");
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                    Err(e) => {
+                        warn!("⚠️ [CROSS-VENUE] Failed to connect Coinbase WSS: {}. Retrying...", e);
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Evaluates lead-lag divergence between Coinbase and Binance in basis points:
+    /// Delta_bps = ((Coinbase - Binance) / Binance) * 10,000
+    pub async fn check_lead_lag(&self, binance_price: f64) -> (bool, f64) {
+        let cp = *self.latest_coinbase_price.read().await;
+        let ct = *self.latest_coinbase_time.read().await;
+
+        if cp <= 0.0 || binance_price <= 0.0 {
+            return (false, 0.0);
+        }
+
+        // Only evaluate if Coinbase data is fresh (within last 2.5 seconds)
+        if let Some(t) = ct {
+            if t.elapsed() > std::time::Duration::from_millis(2500) {
+                return (false, 0.0);
+            }
+        }
+
+        let delta_bps = ((cp - binance_price) / binance_price) * 10_000.0;
+        // If Coinbase is sharply lower than Binance by > 3.5 bps, an informed dump is leading from US
+        let is_adverse_lead = delta_bps < -3.5;
+        (is_adverse_lead, delta_bps)
     }
 }
 
@@ -600,8 +855,12 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
 
     let mut price_history: Vec<f64> = Vec::with_capacity(25); // Pre-alloc for perf
     let mut ema_filter = EmaTrendFilter::new(15.0, 75.0); // 🛡️ Continuous-Time Decay EMA (Tau Fast 15s, Slow 75s)
+    let mut kalman_filter = ExtendedKalmanFilter::new(0.005, 0.02); // 🧠 Zero-Lag State-Space EKF
     let mut ofi_filter = OrderFlowImbalanceFilter::new(); // 🛡️ Order Flow Imbalance (OFI) Filter
     let mut vpin_filter = VpinToxicityFilter::new(50.0, 10); // 🛡️ Volume-Synchronized Probability of Toxicity (VPIN) Filter
+    let mut hawkes_filter = HawkesPointProcessFilter::new(0.75, 2.0); // 🌊 Hawkes Self-Exciting Point Process
+    let lead_lag_sensor = CrossVenueLeadLagSensor::new(); // ⚡ Coinbase vs Binance Cross-Venue Sensor
+    lead_lag_sensor.start_listener();
     let mut prev_trade_price: f64 = 0.0;
     let mut is_trading = false;
     let mut reconnect_attempts: u32 = 0;
@@ -663,11 +922,19 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                     price_history.push(ask_price);
                                     ema_filter.update(ask_price);
 
-                                    // 🛡️ MICROSTRUCTURE INGESTION: Update Order Flow Imbalance & VPIN Toxicity
+                                    // 🧠 EXTENDED KALMAN FILTER UPDATE: Zero-lag true state & velocity estimation
+                                    let mid_price = (ask_price + bid_price) * 0.5;
+                                    let (kalman_price, kalman_vel) = kalman_filter.update(mid_price, spread);
+
+                                    // 🛡️ MICROSTRUCTURE INGESTION: Update Order Flow Imbalance, VPIN & Hawkes
                                     let rolling_ofi = ofi_filter.update(bid_price, bid_qty, ask_price, ask_qty);
                                     let tick_volume = ask_qty + bid_qty;
                                     let effective_prev = if prev_trade_price > 0.0 { prev_trade_price } else { ask_price };
                                     vpin_filter.update(ask_price, effective_prev, tick_volume);
+
+                                    // 🌊 HAWKES POINT PROCESS UPDATE: Track self-exciting trade clustering
+                                    let is_sell_tick = ask_price < effective_prev;
+                                    hawkes_filter.update(is_sell_tick, tick_volume);
                                     prev_trade_price = ask_price;
 
                                     let p = shared_params.read().await;
@@ -751,7 +1018,25 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                             warn!("🛑 [OFI LIQUIDITY SHIELD] Negative order flow imbalance ({:+.2} < 0.0)! Bids fleeing order book. Blocking entry.", ofi_filter.rolling_ofi);
                                         }
 
-                                        if (pure_dip || sentiment_dip) && !waterfall_in_progress && ema_allowed && !is_vpin_toxic && is_ofi_supportive {
+                                        // 🌊 HAWKES SELF-EXCITING CASCADE SHIELD: Block if sell cluster intensity ratio > 3.0
+                                        let (is_hawkes_cascade, hawkes_ratio) = hawkes_filter.is_toxic_cascade();
+                                        if (pure_dip || sentiment_dip) && !waterfall_in_progress && ema_allowed && !is_vpin_toxic && is_ofi_supportive && is_hawkes_cascade {
+                                            warn!("🛑 [HAWKES INTENSITY SHOCK] Endogenous sell cascade detected (R_Hawkes: {:.2} > 3.0)! Cluster avalanche in progress. Blocking buy entry.", hawkes_ratio);
+                                        }
+
+                                        // ⚡ CROSS-VENUE LEAD-LAG SHIELD: Block if Coinbase leads with sharp drop
+                                        let (is_lead_lag_dump, cb_delta_bps) = lead_lag_sensor.check_lead_lag(ask_price).await;
+                                        if (pure_dip || sentiment_dip) && !waterfall_in_progress && ema_allowed && !is_vpin_toxic && is_ofi_supportive && !is_hawkes_cascade && is_lead_lag_dump {
+                                            warn!("🛑 [CROSS-VENUE LEAD-LAG SHIELD] Coinbase leading dump detected ({:+.2} bps)! US institutional sell flow leading Binance. Holding entry.", cb_delta_bps);
+                                        }
+
+                                        // 🧠 EXTENDED KALMAN FILTER MOMENTUM SHIELD: Zero-lag true state drift check
+                                        let is_kalman_momentum_safe = kalman_filter.is_momentum_favorable();
+                                        if (pure_dip || sentiment_dip) && !waterfall_in_progress && ema_allowed && !is_vpin_toxic && is_ofi_supportive && !is_hawkes_cascade && !is_lead_lag_dump && !is_kalman_momentum_safe {
+                                            warn!("🛑 [KALMAN DRIFT SHIELD] Steep negative underlying drift (${:.2}/s)! Microstructure price state not yet stabilized. Blocking entry.", kalman_vel);
+                                        }
+
+                                        if (pure_dip || sentiment_dip) && !waterfall_in_progress && ema_allowed && !is_vpin_toxic && is_ofi_supportive && !is_hawkes_cascade && !is_lead_lag_dump && is_kalman_momentum_safe {
                                             is_trading = true;
                                             let gate = ComplianceGate::new();
                                             if gate.check_trade_validity("ETHUSDT", "BUY", false) {
@@ -778,7 +1063,7 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                                 let entry_reason = if is_sentiment_trigger {
                                                     "NLP Sentiment Sniper + Institutional Order Flow"
                                                 } else {
-                                                    "O-U Mean-Reversion (Extreme Statistical Dip)"
+                                                    "O-U Mean-Reversion + Kalman Zero-Lag Filter"
                                                 };
 
                                                 let msg = format!(
@@ -792,6 +1077,9 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                                     \n\
                                                     📊 Market Research & Triggers:\n\
                                                     • Strategy: {}\n\
+                                                    • Hawkes Cascade R: {:.2} (Safe < 3.0)\n\
+                                                    • Lead-Lag (Coinbase): {:+.1} bps\n\
+                                                    • Kalman Drift: ${:.2}/s (True State: ${:.2})\n\
                                                     • EMA Trend Shield: {}\n\
                                                     • OFI Rolling Flow: {:+.2} (Passive Support)\n\
                                                     • VPIN Toxicity: {:.2} (Safe < 0.65)\n\
@@ -806,6 +1094,7 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                                     ━━━━━━━━━━━━━━━━━━━━",
                                                     ask_price, tp * 100.0, target_tp, target_sl,
                                                     trade_amount, eth_balance, entry_reason,
+                                                    hawkes_ratio, cb_delta_bps, kalman_vel, kalman_price,
                                                     ema_status_reason,
                                                     ofi_filter.rolling_ofi, vpin_filter.current_vpin,
                                                     z_score, std_dev, usdt_balance,
@@ -833,6 +1122,11 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                                     "order_intent_id": order_intent_id,
                                                     "symbol": "ETHUSDT",
                                                     "price": ask_price,
+                                                    "mid_price": mid_price,
+                                                    "kalman_price": kalman_price,
+                                                    "kalman_vel": kalman_vel,
+                                                    "hawkes_ratio": hawkes_ratio,
+                                                    "cb_lead_lag_bps": cb_delta_bps,
                                                     "tp_pct": tp,
                                                     "sl_pct": 0.003,
                                                     "volume": calculated_lot,
