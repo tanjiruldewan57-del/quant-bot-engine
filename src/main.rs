@@ -555,6 +555,9 @@ impl CrossVenueLeadLagSensor {
                             let _ = write.send(tokio_tungstenite::tungstenite::Message::Text(sub_text)).await;
                         }
 
+                        let mut last_cb_p: f64 = 0.0;
+                        let mut last_cb_update = std::time::Instant::now();
+
                         while let Some(msg_result) = read.next().await {
                             if let Ok(msg) = msg_result {
                                 if let Ok(text) = msg.to_text() {
@@ -562,6 +565,14 @@ impl CrossVenueLeadLagSensor {
                                         if let Some(price_str) = val["price"].as_str() {
                                             if let Ok(p) = price_str.parse::<f64>() {
                                                 if p > 100.0 {
+                                                    // ⚡ Zero-Lag Wire Deduplication: Skip sub-cent duplicates within 250ms
+                                                    let is_duplicate = (p - last_cb_p).abs() < 0.01;
+                                                    if is_duplicate && last_cb_update.elapsed() < std::time::Duration::from_millis(250) {
+                                                        continue;
+                                                    }
+                                                    last_cb_p = p;
+                                                    last_cb_update = std::time::Instant::now();
+
                                                     let mut cp = cb_price.write().await;
                                                     *cp = p;
                                                     let mut ct = cb_time.write().await;
@@ -862,6 +873,11 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
     let lead_lag_sensor = CrossVenueLeadLagSensor::new(); // ⚡ Coinbase vs Binance Cross-Venue Sensor
     lead_lag_sensor.start_listener();
     let mut prev_trade_price: f64 = 0.0;
+    let mut last_ask_price: f64 = 0.0;
+    let mut last_bid_price: f64 = 0.0;
+    let mut last_ask_qty: f64 = 0.0;
+    let mut last_bid_qty: f64 = 0.0;
+    let mut last_tick_time = std::time::Instant::now();
     let mut is_trading = false;
     let mut reconnect_attempts: u32 = 0;
     let mut last_sell_time = std::time::Instant::now() - std::time::Duration::from_secs(120); // Cooldown tracker
@@ -901,6 +917,23 @@ pub async fn run_live_trading(shared_params: Arc<RwLock<DynamicParams>>) {
                                     let bid_price: f64 = bid_str.parse().unwrap_or(0.0);
                                     let ask_qty: f64 = parsed["A"].as_str().and_then(|s| s.parse().ok()).unwrap_or(5.0);
                                     let bid_qty: f64 = parsed["B"].as_str().and_then(|s| s.parse().ok()).unwrap_or(5.0);
+
+                                    // ⚡ ZERO-ALPHA-LOSS WIRE & INGESTION OPTIMIZER
+                                    // Skips identical redundant bookTicker frames within 250ms.
+                                    // If price moves by even $0.01, it processes immediately with 0ms delay!
+                                    let is_exact_duplicate = (ask_price == last_ask_price)
+                                        && (bid_price == last_bid_price)
+                                        && ((ask_qty - last_ask_qty).abs() < 0.0001)
+                                        && ((bid_qty - last_bid_qty).abs() < 0.0001);
+
+                                    if is_exact_duplicate && last_tick_time.elapsed() < std::time::Duration::from_millis(250) {
+                                        continue;
+                                    }
+                                    last_tick_time = std::time::Instant::now();
+                                    last_ask_price = ask_price;
+                                    last_bid_price = bid_price;
+                                    last_ask_qty = ask_qty;
+                                    last_bid_qty = bid_qty;
 
                                     // ⚡ EDGE CASE #2: Zero/Invalid Price Guard
                                     if ask_price < 100.0 || bid_price < 100.0 {
